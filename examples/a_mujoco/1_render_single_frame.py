@@ -41,7 +41,10 @@ def main() -> None:
     data = mujoco.MjData(model)
 
     # Render a single frame
-    single_frame_renderer(model, data, show=True)
+    single_frame_renderer(model, data,
+                          show=True,
+                          save=True,
+                          save_path="/workspaces/ariel/single_frame1.png")
 
 
 if __name__ == "__main__":
