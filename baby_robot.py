@@ -2,10 +2,15 @@ from ariel.body_phenotypes.robogen_lite.config import ModuleFaces
 from ariel.body_phenotypes.robogen_lite.modules.brick import BrickModule
 from ariel.body_phenotypes.robogen_lite.modules.core import CoreModule
 from ariel.body_phenotypes.robogen_lite.modules.hinge import HingeModule
+from ariel.simulation.environments import SimpleFlatWorld
+from examples.b_robots._robogen_build import DummyRobotTestAttach, run
 
 
-def custom_robot() -> CoreModule:
-    """Custom robot body built with the 3D editor."""
+def baby_robot() -> CoreModule:
+    """Baby robot body built with the 3D editor.
+    
+    Returns: core module of the baby robot body
+    """
     core = CoreModule(index=0)
     hinge_0 = HingeModule(index=1)
     core.sites[ModuleFaces.LEFT].attach_body(
@@ -93,3 +98,15 @@ def custom_robot() -> CoreModule:
         prefix="brick_7",
     )
     return core
+
+# class BabyRobotTest(DummyRobotTestAttach):
+#     def __init__(self):
+#         super().__init__()
+#         core = baby_robot()
+#         world = SimpleFlatWorld()
+#         world.spawn(core)
+#         self.spec = world.spec
+
+
+# if __name__ == "__main__":
+#     run(BabyRobotTest(), with_viewer=False)
