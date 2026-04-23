@@ -56,8 +56,8 @@ class Crossover:
         child2[crossover_point:] = parent_i_arr[crossover_point:]
 
         # Correct final shape
-        child1 = child1.reshape(parent_i_arr_shape).astype(int).tolist()
-        child2 = child2.reshape(parent_j_arr_shape).astype(int).tolist()
+        child1 = child1.reshape(parent_i_arr_shape).astype(float).tolist()
+        child2 = child2.reshape(parent_j_arr_shape).astype(float).tolist()
         return child1, child2
 
 

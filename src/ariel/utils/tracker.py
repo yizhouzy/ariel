@@ -16,10 +16,11 @@ class Tracker:
         mujoco_obj_to_find: mj.mjtObj | None = None,
         name_to_bind: str | None = None,
         observable_attributes: list[str] | None = None,
-        quiet : bool | None = False
+        quiet : bool | None = False,
     ) -> None:
         """
-        A utility class to track and log the state of specified MuJoCo objects.
+        Track and log the state of specified MuJoCo objects.
+
         Automatically updates during simulation steps.
 
         Parameters

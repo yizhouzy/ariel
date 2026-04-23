@@ -68,6 +68,8 @@ See the [Installation Guide](source/installation_guide) for full details, includ
 
 Contributing guide <source/contributing_guide/index>
 Installation Guide <source/installation_guide>
+Basic API Usage: NDE + CPG <source/tutorial_nde_cpg>
+Quick Start: Modular Robots <source/quickstart_modular_robots>
 Robot Systems <source/robot_systems/index>
 Genotypes <source/genotype_docs/index>
 EAs with ARIEL Introduction <source/EA_intro/index>
