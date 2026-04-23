@@ -1,0 +1,138 @@
+<mujoco model="MuJoCo Model">
+  <compiler angle="radian"/>
+
+  <worldbody>
+    <body name="core">
+      <geom name="core" size="0.1 0.1 0.1" pos="0 0.1 0" type="box" mass="1" rgba="0.992157 0.792157 0.25098 1"/>
+      <body name="lefthinge">
+        <body name="leftstator">
+          <geom name="leftstator" size="0.02475 0.0297 0.02475" type="box" mass="0.02" rgba="0.87451 0.160784 0.207843 1"/>
+        </body>
+        <body name="leftrotor">
+          <joint name="leftservo" axis="0 0 1"/>
+          <geom name="leftrotor" size="0.025 0.02 0.025" type="box" mass="0.04" rgba="0.627451 0.0941176 0.129412 1"/>
+          <body name="left_frontbrick">
+            <geom name="left_frontbrick" size="0.05 0.05 0.05" pos="0 0.05 0" type="box" mass="0.055" rgba="0.109804 0.466667 0.764706 1"/>
+          </body>
+        </body>
+      </body>
+      <body name="fronthinge">
+        <body name="frontstator">
+          <geom name="frontstator" size="0.02475 0.0297 0.02475" type="box" mass="0.02" rgba="0.87451 0.160784 0.207843 1"/>
+        </body>
+        <body name="frontrotor">
+          <joint name="frontservo" axis="0 0 1"/>
+          <geom name="frontrotor" size="0.025 0.02 0.025" type="box" mass="0.04" rgba="0.627451 0.0941176 0.129412 1"/>
+          <body name="front_frontbrick">
+            <geom name="front_frontbrick" size="0.05 0.05 0.05" pos="0 0.05 0" type="box" mass="0.055" rgba="0.109804 0.466667 0.764706 1"/>
+          </body>
+        </body>
+      </body>
+      <body name="righthinge">
+        <body name="rightstator">
+          <geom name="rightstator" size="0.02475 0.0297 0.02475" type="box" mass="0.02" rgba="0.87451 0.160784 0.207843 1"/>
+        </body>
+        <body name="rightrotor">
+          <joint name="rightservo" axis="0 0 1"/>
+          <geom name="rightrotor" size="0.025 0.02 0.025" type="box" mass="0.04" rgba="0.627451 0.0941176 0.129412 1"/>
+          <body name="right_fronthinge">
+            <body name="right_frontstator">
+              <geom name="right_frontstator" size="0.02475 0.0297 0.02475" type="box" mass="0.02" rgba="0.87451 0.160784 0.207843 1"/>
+            </body>
+            <body name="right_frontrotor">
+              <joint name="right_frontservo" axis="0 0 1"/>
+              <geom name="right_frontrotor" size="0.025 0.02 0.025" type="box" mass="0.04" rgba="0.627451 0.0941176 0.129412 1"/>
+              <body name="right_front_frontbrick">
+                <geom name="right_front_frontbrick" size="0.05 0.05 0.05" pos="0 0.05 0" type="box" mass="0.055" rgba="0.109804 0.466667 0.764706 1"/>
+                <body name="right_front_front_fronthinge">
+                  <body name="right_front_front_frontstator">
+                    <geom name="right_front_front_frontstator" size="0.02475 0.0297 0.02475" type="box" mass="0.02" rgba="0.87451 0.160784 0.207843 1"/>
+                  </body>
+                  <body name="right_front_front_frontrotor">
+                    <joint name="right_front_front_frontservo" axis="0 0 1"/>
+                    <geom name="right_front_front_frontrotor" size="0.025 0.02 0.025" type="box" mass="0.04" rgba="0.627451 0.0941176 0.129412 1"/>
+                    <body name="right_front_front_front_frontbrick">
+                      <geom name="right_front_front_front_frontbrick" size="0.05 0.05 0.05" pos="0 0.05 0" type="box" mass="0.055" rgba="0.109804 0.466667 0.764706 1"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="backhinge">
+        <body name="backstator">
+          <geom name="backstator" size="0.02475 0.0297 0.02475" type="box" mass="0.02" rgba="0.87451 0.160784 0.207843 1"/>
+        </body>
+        <body name="backrotor">
+          <joint name="backservo" axis="0 0 1"/>
+          <geom name="backrotor" size="0.025 0.02 0.025" type="box" mass="0.04" rgba="0.627451 0.0941176 0.129412 1"/>
+          <body name="back_frontbrick">
+            <geom name="back_frontbrick" size="0.05 0.05 0.05" pos="0 0.05 0" type="box" mass="0.055" rgba="0.109804 0.466667 0.764706 1"/>
+            <body name="back_front_fronthinge">
+              <body name="back_front_frontstator">
+                <geom name="back_front_frontstator" size="0.02475 0.0297 0.02475" type="box" mass="0.02" rgba="0.87451 0.160784 0.207843 1"/>
+              </body>
+              <body name="back_front_frontrotor">
+                <joint name="back_front_frontservo" axis="0 0 1"/>
+                <geom name="back_front_frontrotor" size="0.025 0.02 0.025" type="box" mass="0.04" rgba="0.627451 0.0941176 0.129412 1"/>
+                <body name="back_front_front_frontbrick">
+                  <geom name="back_front_front_frontbrick" size="0.05 0.05 0.05" pos="0 0.05 0" type="box" mass="0.055" rgba="0.109804 0.466667 0.764706 1"/>
+                  <body name="back_front_front_front_righthinge">
+                    <body name="back_front_front_front_rightstator">
+                      <geom name="back_front_front_front_rightstator" size="0.02475 0.0297 0.02475" type="box" mass="0.02" rgba="0.87451 0.160784 0.207843 1"/>
+                    </body>
+                    <body name="back_front_front_front_rightrotor">
+                      <joint name="back_front_front_front_rightservo" axis="0 0 1"/>
+                      <geom name="back_front_front_front_rightrotor" size="0.025 0.02 0.025" type="box" mass="0.04" rgba="0.627451 0.0941176 0.129412 1"/>
+                      <body name="back_front_front_front_right_frontbrick">
+                        <geom name="back_front_front_front_right_frontbrick" size="0.05 0.05 0.05" pos="0 0.05 0" type="box" mass="0.055" rgba="0.109804 0.466667 0.764706 1"/>
+                      </body>
+                    </body>
+                  </body>
+                  <body name="back_front_front_front_lefthinge">
+                    <body name="back_front_front_front_leftstator">
+                      <geom name="back_front_front_front_leftstator" size="0.02475 0.0297 0.02475" type="box" mass="0.02" rgba="0.87451 0.160784 0.207843 1"/>
+                    </body>
+                    <body name="back_front_front_front_leftrotor">
+                      <joint name="back_front_front_front_leftservo" axis="0 0 1"/>
+                      <geom name="back_front_front_front_leftrotor" size="0.025 0.02 0.025" type="box" mass="0.04" rgba="0.627451 0.0941176 0.129412 1"/>
+                      <body name="back_front_front_front_left_frontbrick">
+                        <geom name="back_front_front_front_left_frontbrick" size="0.05 0.05 0.05" pos="0 0.05 0" type="box" mass="0.055" rgba="0.109804 0.466667 0.764706 1"/>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <contact>
+    <exclude body1="leftstator" body2="leftrotor"/>
+    <exclude body1="frontstator" body2="frontrotor"/>
+    <exclude body1="rightstator" body2="rightrotor"/>
+    <exclude body1="right_frontstator" body2="right_frontrotor"/>
+    <exclude body1="right_front_front_frontstator" body2="right_front_front_frontrotor"/>
+    <exclude body1="backstator" body2="backrotor"/>
+    <exclude body1="back_front_frontstator" body2="back_front_frontrotor"/>
+    <exclude body1="back_front_front_front_rightstator" body2="back_front_front_front_rightrotor"/>
+    <exclude body1="back_front_front_front_leftstator" body2="back_front_front_front_leftrotor"/>
+  </contact>
+
+  <actuator>
+    <general name="leftservo" joint="leftservo" ctrlrange="-1.5708 1.5708" dynprm="0 0 0 0 0 0 0 0 0 0" biastype="affine" biasprm="0 -1 -1"/>
+    <general name="frontservo" joint="frontservo" ctrlrange="-1.5708 1.5708" dynprm="0 0 0 0 0 0 0 0 0 0" biastype="affine" biasprm="0 -1 -1"/>
+    <general name="rightservo" joint="rightservo" ctrlrange="-1.5708 1.5708" dynprm="0 0 0 0 0 0 0 0 0 0" biastype="affine" biasprm="0 -1 -1"/>
+    <general name="right_frontservo" joint="right_frontservo" ctrlrange="-1.5708 1.5708" dynprm="0 0 0 0 0 0 0 0 0 0" biastype="affine" biasprm="0 -1 -1"/>
+    <general name="right_front_front_frontservo" joint="right_front_front_frontservo" ctrlrange="-1.5708 1.5708" dynprm="0 0 0 0 0 0 0 0 0 0" biastype="affine" biasprm="0 -1 -1"/>
+    <general name="backservo" joint="backservo" ctrlrange="-1.5708 1.5708" dynprm="0 0 0 0 0 0 0 0 0 0" biastype="affine" biasprm="0 -1 -1"/>
+    <general name="back_front_frontservo" joint="back_front_frontservo" ctrlrange="-1.5708 1.5708" dynprm="0 0 0 0 0 0 0 0 0 0" biastype="affine" biasprm="0 -1 -1"/>
+    <general name="back_front_front_front_rightservo" joint="back_front_front_front_rightservo" ctrlrange="-1.5708 1.5708" dynprm="0 0 0 0 0 0 0 0 0 0" biastype="affine" biasprm="0 -1 -1"/>
+    <general name="back_front_front_front_leftservo" joint="back_front_front_front_leftservo" ctrlrange="-1.5708 1.5708" dynprm="0 0 0 0 0 0 0 0 0 0" biastype="affine" biasprm="0 -1 -1"/>
+  </actuator>
+</mujoco>
