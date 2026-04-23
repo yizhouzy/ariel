@@ -66,7 +66,6 @@ parser.add_argument('--dur', type=int, default=20,
 parser.add_argument('--population', type=int, default=10, help="Population size")
 parser.add_argument('--fitness', type=str, default='distance', choices=['delta', 'efficiency', 'survival', 'direct', 'distance', 'speed'])
 parser.add_argument('--reach-radius', type=float, default=0.25, help='Planar distance threshold for counting target arrival')
-parser.add_argument('--num-actors', type=int, default=1, help='Number of parallel actors (CPUs) to use; set >1 to enable')
 args = parser.parse_args()
 
 BUDGET = args.budget
@@ -347,146 +346,6 @@ def run_vision_simulation(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Actor-local evaluator for parallel NEProblem actors
-# This function will be pickled and executed on remote actors (via Ray).
-# It lazily builds a local MuJoCo model/data and reuses it across evaluations
-# inside the same actor process to avoid repeated compilation overhead.
-# ---------------------------------------------------------------------------
-_ACTOR_ENV: dict = {}
-
-def _init_actor_env_once() -> None:
-    if _ACTOR_ENV:
-        return
-    world = SimpleFlatWorld()
-
-    # Add Charging Station + global camera (same as main)
-    target_pos = TARGET_POSITIONS[0]
-    target_body = world.spec.worldbody.add_body(name="charging_station",
-                                                mocap=True,
-                                                pos=target_pos)
-    target_body.add_geom(
-        type=mujoco.mjtGeom.mjGEOM_BOX,
-        size=[0.1, 0.1, 0.1],
-        rgba=[0, 1, 0, 1],
-    )
-    world.spec.worldbody.add_camera(
-        name="video_cam",
-        pos=[0, -1, 3],
-        xyaxes=[1, 0, 0, 0, 3, 0],
-    )
-
-    # Spawn Gecko
-    gecko_core = gecko()
-    world.spawn(gecko_core.spec, position=[0, 0, 0.1])
-
-    model = world.spec.compile()
-    data = mujoco.MjData(model)
-
-    # Identify robot camera name
-    robot_cam_name = None
-    for i in range(model.ncam):
-        name = model.camera(i).name
-        if "camera" in name or "core" in name:
-            robot_cam_name = name
-            break
-    if robot_cam_name is None and model.ncam > 0:
-        robot_cam_name = model.camera(0).name
-
-    # Pre-create a tiny renderer if available (vision), otherwise None
-    try:
-        renderer = mujoco.Renderer(model, height=24, width=32)
-    except Exception:
-        renderer = None
-
-    # Mocap id for charging station
-    try:
-        target_mocap_id = model.body("charging_station").mocapid[0]
-    except Exception:
-        target_mocap_id = 0
-
-    _ACTOR_ENV.update({
-        "world": world,
-        "model": model,
-        "data": data,
-        "robot_cam_name": robot_cam_name,
-        "renderer": renderer,
-        "target_mocap_id": target_mocap_id,
-    })
-
-
-def actor_fitness(net) -> float:
-    """Top-level evaluator used by NEProblem in distributed mode.
-
-    Receives a parameterised PyTorch module `net` and returns a scalar
-    fitness. This mirrors the logic previously implemented in the
-    `fitness_function` nested inside `evolve` but builds a local Mujoco
-    environment per actor so evaluations are independent and parallel.
-    """
-    _init_actor_env_once()
-
-    model = _ACTOR_ENV["model"]
-    data = _ACTOR_ENV["data"]
-    renderer = _ACTOR_ENV.get("renderer", None)
-    robot_cam_name = _ACTOR_ENV.get("robot_cam_name", None)
-    target_mocap_id = _ACTOR_ENV.get("target_mocap_id", 0)
-
-    total_fitness = 0.0
-
-    for target_pos in TARGET_POSITIONS:
-        mujoco.mj_resetData(model, data)
-
-        # Place target for this episode
-        data.mocap_pos[target_mocap_id] = target_pos
-
-        metrics = run_vision_simulation(
-            model,
-            data,
-            network=net,
-            duration=DURATION,
-            target_position=np.asarray(target_pos),
-            renderer=renderer,
-            cam_name=robot_cam_name,
-            control_step_freq=50,
-        )
-
-        final_pos = np.array(data.qpos[0:3].copy())
-        final_z_height = final_pos[2]
-
-        final_battery = metrics.get("final_battery", 0.0)
-        battery_threshold = 0.3
-        battery_low = final_battery <= battery_threshold
-
-        if battery_low:
-            if args.fitness == "delta":
-                score = fitness_delta_distance(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos))
-            elif args.fitness == "distance":
-                score = distance_to_target(final_pos, np.asarray(target_pos))
-            elif args.fitness == "survival":
-                score = fitness_survival_and_locomotion(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos), final_z_height)
-            elif args.fitness == "efficiency":
-                score = fitness_distance_and_efficiency(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos), 0.0)
-            elif args.fitness == "direct":
-                score = fitness_direct_path(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos), metrics.get("path_length", 0.0))
-            elif args.fitness == "speed":
-                score = fitness_speed_to_target(
-                    time_to_target=metrics.get("time_to_target", None),
-                    duration=DURATION,
-                    min_distance_to_target=metrics.get("min_distance_to_target", float("inf")),
-                )
-            else:
-                score = distance_to_target(final_pos, np.asarray(target_pos))
-
-            shaped = float(metrics.get("shaped_homing", 0.0))
-            score = float(score) - shaped
-        else:
-            score = -float(metrics.get("path_length", 0.0))
-
-        total_fitness += score
-
-    return total_fitness / len(TARGET_POSITIONS)
-
-
 # ============================================================================ #
 #                         Define evolutionary loop                             #
 # ============================================================================ #
@@ -621,31 +480,12 @@ def evolve(world, model, data) -> list[float]:
     )
 
     # Initialise Problem for the solver/learner
-    # Enable distributed actors only when the user requests more than 1 actor
-    num_actors_cfg = args.num_actors if (hasattr(args, "num_actors") and args.num_actors is not None and args.num_actors > 1) else None
-    if num_actors_cfg is not None:
-        # Ask Ray to avoid packaging large or irrelevant folders to speed startup
-        actor_config = {
-            "num_cpus": 1,
-            "runtime_env": {
-                "excludes": [
-                    ".git",
-                    ".venv",
-                    "__pycache__",
-                ]
-            },
-        }
-    else:
-        actor_config = None
-
     problem = NEProblem(
             objective_sense="min",
-            network_eval_func=actor_fitness,
+            network_eval_func=fitness_function,
             network=network.eval(),
             initial_bounds=(-0.5, 0.5),
             device="cpu",
-            num_actors=num_actors_cfg,
-            actor_config=actor_config,
     )
 
     # Initialise CMA-ES learner

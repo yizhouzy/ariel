@@ -66,7 +66,6 @@ parser.add_argument('--dur', type=int, default=20,
 parser.add_argument('--population', type=int, default=10, help="Population size")
 parser.add_argument('--fitness', type=str, default='distance', choices=['delta', 'efficiency', 'survival', 'direct', 'distance', 'speed'])
 parser.add_argument('--reach-radius', type=float, default=0.25, help='Planar distance threshold for counting target arrival')
-parser.add_argument('--num-actors', type=int, default=1, help='Number of parallel actors (CPUs) to use; set >1 to enable')
 args = parser.parse_args()
 
 BUDGET = args.budget
@@ -82,8 +81,6 @@ REACH_RADIUS = max(0.01, args.reach_radius)
 # ]
 
 TARGET_POSITIONS = [
-    [-0.5 , -2, 0.1],  # Left
-    [0.0, -2, 0.1],    # Center
     [0.5, -2, 0.1],  # Right
 ]
 
@@ -197,32 +194,20 @@ def analyze_sections(green_mask):
 
 # Custom simulation runner with camera
 
-def run_vision_simulation(
-    model,
-    data,
-    network: Network,
-    duration: int,
-    target_position: Optional[np.ndarray] = None,
-    renderer: Optional[mujoco.Renderer] = None,
-    cam_name: Optional[str] = None,
-    initial_battery: Optional[float] = None,
-    control_step_freq: int = 50,
-) -> dict[str, Any]:
-    """Custom runner that processes vision.
-
-    Returns runtime metrics including `final_battery` and `shaped_homing`.
-    """
+def run_vision_simulation(model: mujoco.MjModel,
+                          data: mujoco.MjData,
+                          network: Network,
+                          duration: int,
+                          target_position: Optional[np.ndarray] = None,
+                          renderer: Optional[mujoco.Renderer] = None,
+                          cam_name: Optional[str] = None,
+                          control_step_freq: int = 50,
+                          ) -> dict[str, float|Float_like|List[tuple] | None]:
+    """Custom runner that processes vision."""
 
     # Setup Renderer if not passed (creates a new context)
-    created_renderer = False
     if renderer is None:
-        try:
-            renderer = mujoco.Renderer(model, height=24, width=32)
-            created_renderer = True
-        except Exception:
-            console.log("[yellow]run_vision_simulation: renderer init failed; running without vision.[/yellow]")
-            renderer = None
-            created_renderer = False
+        renderer = mujoco.Renderer(model, height=24, width=32)
 
     timestep = model.opt.timestep
 
@@ -235,22 +220,11 @@ def run_vision_simulation(
     time_to_target: float | None = None
 
     trajectory = []
-
-    # Battery: randomized per-episode unless a deterministic value is provided.
-    if initial_battery is None:
-        battery = float(np.random.rand())
-    else:
-        battery = float(initial_battery)
+    # Battery state: starts full (1.0)
+    # and drains linearly over the evaluation duration.
+    battery = 1.0
     battery_drain_per_sec = 1.0 / max(float(duration), 1.0)
     battery_decrement_per_step = battery_drain_per_sec * timestep
-
-    # Shaped homing accumulator (accumulates positive reductions in planar distance
-    # once the battery is low).
-    shaped_homing = 0.0
-    battery_threshold = 0.3
-    prev_planar_distance: Optional[float] = None
-    if target_position is not None:
-        prev_planar_distance = float(np.linalg.norm(last_pos[:2] - np.asarray(target_position)[:2]))
 
     while data.time < duration:
         # Calculate deduced step count (Optimization from controller.py)
@@ -259,18 +233,12 @@ def run_vision_simulation(
         # --- CONTROL STEP ---
         # Only run expensive vision and network pass every N steps
         if deduced_step % control_step_freq == 0:
-            if renderer is not None:
-                try:
-                    renderer.update_scene(data, camera=cam_name)
-                    img = renderer.render()
-                    # 2. Process Vision
-                    mask = isolate_green(img)
-                    vision_inputs = analyze_sections(mask)
-                except Exception:
-                    # Renderer failed mid-run; fall back to zeros
-                    vision_inputs = [0.0, 0.0, 0.0]
-            else:
-                vision_inputs = [0.0, 0.0, 0.0]
+            renderer.update_scene(data, camera=cam_name)
+            img = renderer.render()
+
+            # 2. Process Vision
+            mask = isolate_green(img)
+            vision_inputs = analyze_sections(mask)
 
             # 3. Prepare Inputs
             robot_state = get_robot_state(data)
@@ -285,7 +253,7 @@ def run_vision_simulation(
             state_input = np.concatenate([
                 robot_state,
                 vision_inputs,
-                phase_inputs,
+                phase_inputs,  # Add to the end
                 [battery],
             ]).astype(np.float32)
 
@@ -315,176 +283,16 @@ def run_vision_simulation(
             if time_to_target is None and planar_distance <= REACH_RADIUS:
                 time_to_target = float(data.time)
 
-            # Accumulate positive improvements in planar distance
-            cur_planar_distance = planar_distance
-            if battery <= battery_threshold:
-                if prev_planar_distance is None:
-                    prev_planar_distance = cur_planar_distance
-                delta = prev_planar_distance - cur_planar_distance
-                if delta > 0:
-                    shaped_homing += delta
-            prev_planar_distance = cur_planar_distance
-
     if target_position is None:
         min_distance_to_target = float(np.linalg.norm(last_pos[:2]))
 
-    results = {
+    return {
         "path_length": total_path_length,
         "trajectory": trajectory,
         "min_distance_to_target": min_distance_to_target,
         "time_to_target": time_to_target,
         "final_battery": battery,
-        "shaped_homing": shaped_homing,
-    }
-
-    # Close any renderer we created locally to avoid lingering EGL contexts.
-    if created_renderer:
-        try:
-            renderer.close()
-        except Exception:
-            pass
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Actor-local evaluator for parallel NEProblem actors
-# This function will be pickled and executed on remote actors (via Ray).
-# It lazily builds a local MuJoCo model/data and reuses it across evaluations
-# inside the same actor process to avoid repeated compilation overhead.
-# ---------------------------------------------------------------------------
-_ACTOR_ENV: dict = {}
-
-def _init_actor_env_once() -> None:
-    if _ACTOR_ENV:
-        return
-    world = SimpleFlatWorld()
-
-    # Add Charging Station + global camera (same as main)
-    target_pos = TARGET_POSITIONS[0]
-    target_body = world.spec.worldbody.add_body(name="charging_station",
-                                                mocap=True,
-                                                pos=target_pos)
-    target_body.add_geom(
-        type=mujoco.mjtGeom.mjGEOM_BOX,
-        size=[0.1, 0.1, 0.1],
-        rgba=[0, 1, 0, 1],
-    )
-    world.spec.worldbody.add_camera(
-        name="video_cam",
-        pos=[0, -1, 3],
-        xyaxes=[1, 0, 0, 0, 3, 0],
-    )
-
-    # Spawn Gecko
-    gecko_core = gecko()
-    world.spawn(gecko_core.spec, position=[0, 0, 0.1])
-
-    model = world.spec.compile()
-    data = mujoco.MjData(model)
-
-    # Identify robot camera name
-    robot_cam_name = None
-    for i in range(model.ncam):
-        name = model.camera(i).name
-        if "camera" in name or "core" in name:
-            robot_cam_name = name
-            break
-    if robot_cam_name is None and model.ncam > 0:
-        robot_cam_name = model.camera(0).name
-
-    # Pre-create a tiny renderer if available (vision), otherwise None
-    try:
-        renderer = mujoco.Renderer(model, height=24, width=32)
-    except Exception:
-        renderer = None
-
-    # Mocap id for charging station
-    try:
-        target_mocap_id = model.body("charging_station").mocapid[0]
-    except Exception:
-        target_mocap_id = 0
-
-    _ACTOR_ENV.update({
-        "world": world,
-        "model": model,
-        "data": data,
-        "robot_cam_name": robot_cam_name,
-        "renderer": renderer,
-        "target_mocap_id": target_mocap_id,
-    })
-
-
-def actor_fitness(net) -> float:
-    """Top-level evaluator used by NEProblem in distributed mode.
-
-    Receives a parameterised PyTorch module `net` and returns a scalar
-    fitness. This mirrors the logic previously implemented in the
-    `fitness_function` nested inside `evolve` but builds a local Mujoco
-    environment per actor so evaluations are independent and parallel.
-    """
-    _init_actor_env_once()
-
-    model = _ACTOR_ENV["model"]
-    data = _ACTOR_ENV["data"]
-    renderer = _ACTOR_ENV.get("renderer", None)
-    robot_cam_name = _ACTOR_ENV.get("robot_cam_name", None)
-    target_mocap_id = _ACTOR_ENV.get("target_mocap_id", 0)
-
-    total_fitness = 0.0
-
-    for target_pos in TARGET_POSITIONS:
-        mujoco.mj_resetData(model, data)
-
-        # Place target for this episode
-        data.mocap_pos[target_mocap_id] = target_pos
-
-        metrics = run_vision_simulation(
-            model,
-            data,
-            network=net,
-            duration=DURATION,
-            target_position=np.asarray(target_pos),
-            renderer=renderer,
-            cam_name=robot_cam_name,
-            control_step_freq=50,
-        )
-
-        final_pos = np.array(data.qpos[0:3].copy())
-        final_z_height = final_pos[2]
-
-        final_battery = metrics.get("final_battery", 0.0)
-        battery_threshold = 0.3
-        battery_low = final_battery <= battery_threshold
-
-        if battery_low:
-            if args.fitness == "delta":
-                score = fitness_delta_distance(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos))
-            elif args.fitness == "distance":
-                score = distance_to_target(final_pos, np.asarray(target_pos))
-            elif args.fitness == "survival":
-                score = fitness_survival_and_locomotion(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos), final_z_height)
-            elif args.fitness == "efficiency":
-                score = fitness_distance_and_efficiency(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos), 0.0)
-            elif args.fitness == "direct":
-                score = fitness_direct_path(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos), metrics.get("path_length", 0.0))
-            elif args.fitness == "speed":
-                score = fitness_speed_to_target(
-                    time_to_target=metrics.get("time_to_target", None),
-                    duration=DURATION,
-                    min_distance_to_target=metrics.get("min_distance_to_target", float("inf")),
-                )
-            else:
-                score = distance_to_target(final_pos, np.asarray(target_pos))
-
-            shaped = float(metrics.get("shaped_homing", 0.0))
-            score = float(score) - shaped
-        else:
-            score = -float(metrics.get("path_length", 0.0))
-
-        total_fitness += score
-
-    return total_fitness / len(TARGET_POSITIONS)
+        }
 
 
 # ============================================================================ #
@@ -507,13 +315,8 @@ def evolve(world, model, data) -> list[float]:
     if robot_cam_name is None and model.ncam > 0:
         robot_cam_name = model.camera(0).name
 
-    # Pre-initialize renderer for the evolution loop (best-effort).
-    # In headless environments renderer creation may fail; fall back to None.
-    try:
-        renderer = mujoco.Renderer(model, height=24, width=32)
-    except Exception:
-        console.log("[yellow]Renderer init failed; running evolution without pre-created renderer.[/yellow]")
-        renderer = None
+    # Pre-initialize renderer for the evolution loop
+    renderer = mujoco.Renderer(model, height=24, width=32)
 
     # Get Mocap ID for the charging station
     try:
@@ -524,7 +327,6 @@ def evolve(world, model, data) -> list[float]:
 
     # Define the fitness function
     def fitness_function(x: Network) -> float:
-        
         total_fitness = 0.0
 
         for target_pos in TARGET_POSITIONS:
@@ -589,9 +391,6 @@ def evolve(world, model, data) -> list[float]:
                     )
                 else:
                     score = distance_to_target(final_pos, target_pos_arr)
-                # Apply shaped homing bonus (reduces score since lower is better)
-                shaped = float(metrics.get("shaped_homing", 0.0))
-                score = float(score) - shaped
             else:
                 # Battery not low -> prioritize locomotion/exploration
                 # (longer path is better)
@@ -621,31 +420,12 @@ def evolve(world, model, data) -> list[float]:
     )
 
     # Initialise Problem for the solver/learner
-    # Enable distributed actors only when the user requests more than 1 actor
-    num_actors_cfg = args.num_actors if (hasattr(args, "num_actors") and args.num_actors is not None and args.num_actors > 1) else None
-    if num_actors_cfg is not None:
-        # Ask Ray to avoid packaging large or irrelevant folders to speed startup
-        actor_config = {
-            "num_cpus": 1,
-            "runtime_env": {
-                "excludes": [
-                    ".git",
-                    ".venv",
-                    "__pycache__",
-                ]
-            },
-        }
-    else:
-        actor_config = None
-
     problem = NEProblem(
             objective_sense="min",
-            network_eval_func=actor_fitness,
+            network_eval_func=fitness_function,
             network=network.eval(),
             initial_bounds=(-0.5, 0.5),
             device="cpu",
-            num_actors=num_actors_cfg,
-            actor_config=actor_config,
     )
 
     # Initialise CMA-ES learner
@@ -662,12 +442,6 @@ def evolve(world, model, data) -> list[float]:
 
         console.rule(f"Budget: {bud}/{BUDGET}")
         console.log(f"Best Fit (Avg): {gen_best:.4f}")
-
-    # Close the renderer pre-initialized for evolution to free EGL resources
-    try:
-        renderer.close()
-    except Exception:
-        pass
 
     best_ind = searcher.status["best"].values
     return best_ind, input_dim
@@ -694,14 +468,14 @@ def main():
         rgba=[0, 1, 0, 1],
     )
 
-    # Global Camera for Video Recording
+    # Add Global Camera for Video Recording
     world.spec.worldbody.add_camera(
         name="video_cam",
         pos=[0, -1, 3],
         xyaxes=[1, 0, 0, 0, 3, 0],
     )
 
-    # Gecko Robot
+    # Spawn Gecko
     gecko_core = gecko()
     world.spawn(gecko_core.spec, position=[0, 0, 0.1])
 
@@ -756,24 +530,17 @@ if __name__ == "__main__":
     data.mocap_pos[target_mocap_id] = TARGET_POSITIONS[0]
 
     # 1. Renderer for Robot Vision (Low Res)
-    try:
-        control_renderer = mujoco.Renderer(model, height=24, width=32)
-    except Exception:
-        console.log("[yellow]control_renderer init failed; replay will run without low-res vision.[/yellow]")
-        control_renderer = None
+    control_renderer = mujoco.Renderer(model, height=24, width=32)
 
     # 2. Renderer for Video Output (High Res)
-    # (use context-managed renderer below; avoid creating an extra EGL context here)
+    video_capture_renderer = mujoco.Renderer(model, height=480, width=640)
 
     def get_vision_control_signal(m, d):
-        if robot_cam_name and control_renderer is not None:
-            try:
-                control_renderer.update_scene(d, camera=robot_cam_name)
-                img = control_renderer.render()
-                mask = isolate_green(img)
-                vision_inputs = analyze_sections(mask)
-            except Exception:
-                vision_inputs = [0, 0, 0]
+        if robot_cam_name:
+            control_renderer.update_scene(d, camera=robot_cam_name)
+            img = control_renderer.render()
+            mask = isolate_green(img)
+            vision_inputs = analyze_sections(mask)
         else:
             vision_inputs = [0, 0, 0]
 
@@ -832,8 +599,16 @@ if __name__ == "__main__":
     viz_options.flags[mujoco.mjtVisFlag.mjVIS_BODYBVH] = False
 
     # 4. Get Camera ID ("video_cam" is the one we created earlier)
-    camera_id = mujoco.mj_name2id(model,
+                              initial_battery: Optional[float] = None,
+                              control_step_freq: int = 50,
                                   mujoco.mjtObj.mjOBJ_CAMERA,
+        """Custom runner that processes vision."""
+    
+        # Setup Renderer if not passed (creates a new context)
+        created_renderer = False
+        if renderer is None:
+            renderer = mujoco.Renderer(model, height=24, width=32)
+            created_renderer = True
                                   "video_cam")
 
     # 5. Timing Variables
@@ -845,80 +620,110 @@ if __name__ == "__main__":
 
     # 6. Setup separate renderer for the Robot's Vision (Low Res)
     # We keep this outside the video loop so we don't recreate it every frame
+    control_renderer = mujoco.Renderer(model, height=24, width=32)
+        # Battery: randomized per-episode unless a deterministic value is provided.
+        if initial_battery is None:
+            battery = float(np.random.rand())
+        else:
+            battery = float(initial_battery)
+        battery_drain_per_sec = 1.0 / max(float(duration), 1.0)
+        battery_decrement_per_step = battery_drain_per_sec * timestep
 
-    # 7. Main Rendering Loop (Using Context Manager as requested)
-    # We use the video_recorder width/height for the output video. Attempt to
-    # create a high-res renderer and run recording; if unavailable (headless)
-    # skip video rendering but still run a deterministic evaluation for plotting.
-    try:
-        tmp_renderer = mujoco.Renderer(model, height=480, width=640)
-    except Exception:
-        tmp_renderer = None
+        # Shaped homing accumulator (accumulates positive reductions in planar distance
+        # once the battery is low).
+        shaped_homing = 0.0
+        battery_threshold = 0.3
+        prev_planar_distance: Optional[float] = None
+        if target_position is not None:
+            prev_planar_distance = float(np.linalg.norm(last_pos[:2] - np.asarray(target_position)[:2]))
+        while data.time < DURATION:
 
-    if tmp_renderer is not None:
-        with tmp_renderer as renderer:
-            while data.time < DURATION:
-                # INNER LOOP: Step physics N times to match Video FPS
-                for _ in range(steps_per_frame):
-                    deduced_step = int(np.ceil(data.time / dt))
-                    if deduced_step % control_step_freq == 0:
-                        current_ctrl = get_vision_control_signal(model, data)
+            # INNER LOOP: Step physics N times to match Video FPS
+            # We must loop manually here to inject the Control Logic
+            for _ in range(steps_per_frame):
 
-                    data.ctrl[:] = current_ctrl
-                    mujoco.mj_step(model, data)
+                # A. Calculate deduced step (Exact same timing as training)
+                deduced_step = int(np.ceil(data.time / dt))
 
-                renderer.update_scene(
-                    data,
-                    scene_option=viz_options,
-                    camera=camera_id,
-                )
-                video_recorder.write(frame=renderer.render())
+                # B. Run Network if needed
+                if deduced_step % control_step_freq == 0:
+                    current_ctrl = get_vision_control_signal(model, data)
 
-        # Finish recording
+                # C. Apply Control & Step
+                data.ctrl[:] = current_ctrl
+                mujoco.mj_step(model, data)
+
+            # OUTER LOOP: Render Frame (Once per 1/30th second)
+            renderer.update_scene(
+                data,
+                scene_option=viz_options,
+                camera=camera_id,
+            )
+
+            # Use the VideoRecorder's write method
+            # (handles cv2/saving internally)
+            video_recorder.write(frame=renderer.render())
+
+        # 8. Finish
         video_recorder.release()
         console.log(f"[green]Video rendering complete. Saved to {path_to_video_folder}[/green]")
 
-    else:
-        console.log("[yellow]High-res renderer unavailable; skipped video rendering.[/yellow]")
+        # 9. Save Path Figure
 
-    # 9. Save Path Figure (run a deterministic evaluation for the plot)
-    test_target = TARGET_POSITIONS[0]
-    mujoco.mj_resetData(model, data)
-    data.mocap_pos[target_mocap_id] = test_target
+        # Pick one target position to test on (e.g., the first one)
+        test_target = TARGET_POSITIONS[0]
+        mujoco.mj_resetData(model, data)
+        data.mocap_pos[target_mocap_id] = test_target
 
-    metrics = run_vision_simulation(
-        model,
-        data,
-        network=network,
-        duration=DURATION,
-        target_position=np.asarray(test_target),
-        renderer=None,
-        cam_name=robot_cam_name,
-        initial_battery=1.0,
-        control_step_freq=50,
-    )
+        # Run the simulation once more to get the path
+        metrics = run_vision_simulation(
+            model,
+            data,
+            network=network,
+            duration=DURATION,
+            target_position=np.asarray(test_target),
+            renderer=None,  # No need to render video for this
+            cam_name=robot_cam_name,  # <--- ADD THIS LINE HERE
+            control_step_freq=50,
+        )
 
-    # Extract X and Y coordinates
-    path = metrics["trajectory"]
-    x_coords = [p[0] for p in path]
-    y_coords = [p[1] for p in path]
+        # Extract X and Y coordinates
+        path = metrics["trajectory"]
+        x_coords = [p[0] for p in path]
+        y_coords = [p[1] for p in path]
+                # Shaped homing: accumulate positive improvements in planar distance
+                cur_planar_distance = planar_distance
+                if battery <= battery_threshold:
+                    if prev_planar_distance is None:
+                        prev_planar_distance = cur_planar_distance
+                    delta = prev_planar_distance - cur_planar_distance
+                    if delta > 0:
+                        shaped_homing += delta
+                prev_planar_distance = cur_planar_distance
 
-    # Create the plot
-    plt.figure(figsize=(8, 8))
-    plt.plot(x_coords[0], y_coords[0], "go", markersize=10, label="Start")
-    plt.plot(test_target[0], test_target[1], "r*", markersize=15, label="Target")
-    plt.plot(x_coords, y_coords, "b-", linewidth=2, label="Robot Path")
-    plt.title(f"Robot Trajectory Map (Fitness: {args.fitness})")
-    plt.xlabel("X Position (meters)")
-    plt.ylabel("Y Position (meters)")
-    plt.legend()
-    plt.grid(True)
-    plot_path = os.path.join(path_to_video_folder, f"trajectory_{args.fitness}.png")
-    plt.savefig(plot_path)
-    console.log(f"[green]Trajectory map saved to {plot_path}[/green]")
+        # Create the plot
+        plt.figure(figsize=(8, 8))
 
-    # Cleanup control renderer used for low-res vision
-    try:
-        control_renderer.close()
-    except Exception:
-        pass
+        # Plot the robot's starting position
+        plt.plot(x_coords[0], y_coords[0], "go", markersize=10, label="Start")
+
+        # Plot the Target position
+        plt.plot(test_target[0],
+                 test_target[1],
+                 "r*",
+                 markersize=15,
+                 label="Target")
+
+        # Plot the actual path
+        plt.plot(x_coords, y_coords, "b-", linewidth=2, label="Robot Path")
+
+        plt.title(f"Robot Trajectory Map (Fitness: {args.fitness})")
+        plt.xlabel("X Position (meters)")
+        plt.ylabel("Y Position (meters)")
+        plt.legend()
+        plt.grid(True)
+
+        # Save the plot next to your videos
+        plot_path = os.path.join(path_to_video_folder, f"trajectory_{args.fitness}.png")
+        plt.savefig(plot_path)
+        console.log(f"[green]Trajectory map saved to {plot_path}[/green]")
