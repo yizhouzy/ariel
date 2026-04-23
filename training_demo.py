@@ -1,7 +1,7 @@
 
-"""Summary: Gecko Controller.
+"""Summary: Baby Controller.
 
-Goal: Evolve a controller for the Gecko robot that is able to:
+Goal: Evolve a controller for the Baby robot that is able to:
 1. Sense the battery level & switch to foraging mode when drops below threshold
 2. Spin around to find the charging station using its camera
 3. walk to the charging station and stop there
@@ -42,7 +42,8 @@ from evotorch.neuroevolution import NEProblem
 
 # Local libraries
 from ariel.simulation.environments import SimpleFlatWorld
-from ariel.body_phenotypes.robogen_lite.prebuilt_robots.gecko import gecko
+from ariel.simulation.controllers.controller import Controller
+from ariel.simulation.controllers.na_cpg import (NaCPG, create_fully_connected_adjacency)
 from ariel.utils.tracker import Tracker
 from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
 from ariel.utils.renderers import VideoRecorder, video_renderer
@@ -54,6 +55,7 @@ from ariel.simulation.tasks.targeted_locomotion import (
     distance_to_target,
     fitness_speed_to_target,
 )
+from baby_robot import baby_robot
 
 # Set up command line argument parsing
 # If none given, default values are used.
@@ -74,12 +76,7 @@ DURATION = args.dur
 POP_SIZE = args.population
 REACH_RADIUS = max(0.01, args.reach_radius)
 
-# 1. Defined 3 target positions to prevent overfitting
-# TARGET_POSITIONS = [ 
-#     [-0.5 , -2, 0.1],  # Left
-#     [0.0, -2, 0.1],    # Center
-#     [0.5, -2, 0.1]     # Right
-# ]
+# 1. Defined random target positions to prevent overfitting
 
 TARGET_POSITIONS = [
     [-0.5 , -2, 0.1],  # Left
@@ -376,9 +373,9 @@ def _init_actor_env_once() -> None:
         xyaxes=[1, 0, 0, 0, 3, 0],
     )
 
-    # Spawn Gecko
-    gecko_core = gecko()
-    world.spawn(gecko_core.spec, position=[0, 0, 0.1])
+    # Spawn Baby
+    baby_core = baby_robot()
+    world.spawn(baby_core.spec, position=[0, 0, 0.1])
 
     model = world.spec.compile()
     data = mujoco.MjData(model)
@@ -701,9 +698,8 @@ def main():
         xyaxes=[1, 0, 0, 0, 3, 0],
     )
 
-    # Gecko Robot
-    gecko_core = gecko()
-    world.spawn(gecko_core.spec, position=[0, 0, 0.1])
+    baby_core = baby_robot()
+    world.spawn(baby_core.spec, position=[0, 0, 0.1])
 
     model = world.spec.compile()
     data = mujoco.MjData(model)
@@ -720,7 +716,7 @@ if __name__ == "__main__":
 
     console.log(f"Evolution took {(end - start) / 60:.2f} minutes")
 
-    weights_path = "3_gecko_vision_new.npy"
+    weights_path = "3_baby_vision_new.npy"
     # Unconditionally save the new weights, overwriting any old ones
     np.save(weights_path, best_weights)
     console.log(f"Best weights saved to {weights_path}")
@@ -815,7 +811,7 @@ if __name__ == "__main__":
 
     # 1. Setup VideoRecorder (using your Ariel library class)
     video_recorder = VideoRecorder(
-        file_name="gecko_vision_best",
+        file_name="baby_vision_best",
         output_folder=path_to_video_folder,
     )
 
