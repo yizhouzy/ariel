@@ -45,15 +45,40 @@ mujoco.set_mjcb_control(None)
 
 # Create the world
 world = SimpleFlatWorld()
-# Create the robot body
+# # Create the robot body
 baby_robot = baby_robot()
 # Spawn the robot at the origin
 world.spawn(baby_robot.spec,position=[0,0,0])
 # Charging station
-target_pos=[0.5, 0.5, 0.5]
+target_pos=[0.5, 0.5, 0]
 target_body = world.spec.worldbody.add_body(name="charging_station",
                                                 mocap=True,
                                                 pos=target_pos)
+
+# Traffic cone
+#  base (wide cylinder)
+target_body.add_geom(
+    type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+    size=[0.2, 0.002, 0],           # radius=0.2, half-height=0.005
+    pos=[0, 0, 0],            # x, y, z
+    rgba=[1.0, 0.4, 0.0, 1.0],   # orange
+)
+
+target_body.add_geom(
+    type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+    size=[0.1, 0.3, 0],
+    pos=[0, 0, 0.3],
+    rgba=[1.0, 0.4, 0.0, 1.0],
+)
+
+# White reflective stripe
+target_body.add_geom(
+    type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+    size=[0.1, 0.008, 0],
+    pos=[0, 0, 0.5],
+    rgba=[1.0, 1.0, 1.0, 0.9],   # white
+)
+
 
 # Compile into a MuJoCo model and initialization data
 model = world.spec.compile()
