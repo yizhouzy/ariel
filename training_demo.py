@@ -619,7 +619,9 @@ def evolve(world, model, data) -> list[float]:
 
     # Initialise Problem for the solver/learner
     # Enable distributed actors only when the user requests more than 1 actor
-    num_actors_cfg = args.num_actors if (hasattr(args, "num_actors") and args.num_actors is not None and args.num_actors > 1) else None
+    num_actors_cfg = args.num_actors if (hasattr(args, "num_actors") 
+                                         and args.num_actors is not None 
+                                         and args.num_actors > 1) else None
     if num_actors_cfg is not None:
         # Ask Ray to avoid packaging large or irrelevant folders to speed startup
         actor_config = {
