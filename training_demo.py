@@ -18,12 +18,12 @@ from pathlib import Path
 import time
 import os
 import cv2
-# Pretty little errors and progress bars
-from rich.console import Console
-from rich.traceback import install
-# Initialize rich console and traceback handler
-install()
-console = Console()
+# # Pretty little errors and progress bars
+# from rich.console import Console
+# from rich.traceback import install
+# # Initialize rich console and traceback handler
+# install()
+# console = Console()
 
 # Third-party libraries
 import numpy as np
@@ -43,9 +43,9 @@ from evotorch.neuroevolution import NEProblem
 # Local libraries
 from ariel.simulation.environments import SimpleFlatWorld
 from ariel.simulation.controllers.controller import Controller
+from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
 from ariel.simulation.controllers.na_cpg import (NaCPG, create_fully_connected_adjacency)
 from ariel.utils.tracker import Tracker
-from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
 from ariel.utils.renderers import VideoRecorder, video_renderer
 from ariel.simulation.tasks.targeted_locomotion import (
     fitness_delta_distance,
@@ -57,15 +57,18 @@ from ariel.simulation.tasks.targeted_locomotion import (
 )
 from baby_robot import baby_robot
 
+from matplotlib.collections import LineCollection
+from matplotlib.colors import LinearSegmentedColormap
+
 # Set up command line argument parsing
 # If none given, default values are used.
 import argparse
 parser = argparse.ArgumentParser(description='Evolution simulation with configurable budget')
-parser.add_argument('--budget', type=int, default=40,
+parser.add_argument('--budget', type=int, default=200,
                     help='Number of generations for learning')
 parser.add_argument('--dur', type=int, default=20,
                     help="Duration of an evaluation")
-parser.add_argument('--population', type=int, default=10, help="Population size")
+parser.add_argument('--population', type=int, default=50, help="Population size")
 parser.add_argument('--fitness', type=str, default='distance', choices=['delta', 'efficiency', 'survival', 'direct', 'distance', 'speed'])
 parser.add_argument('--reach-radius', type=float, default=0.25, help='Planar distance threshold for counting target arrival')
 parser.add_argument('--num-actors', type=int, default=1, help='Number of parallel actors (CPUs) to use; set >1 to enable')
@@ -79,10 +82,16 @@ REACH_RADIUS = max(0.01, args.reach_radius)
 # 1. Defined random target positions to prevent overfitting
 
 TARGET_POSITIONS = [
-    [-0.5 , -2, 0.1],  # Left
-    [0.0, -2, 0.1],    # Center
-    [0.5, -2, 0.1],  # Right
+    [-0.8, -2.0, 0.1],
+    [-0.4, -1.5, 0.1],
+    [0.0, -2.0, 0.1],
+    [0.0, -1.0, 0.1],
+    [0.4, -1.5, 0.1],
+    [0.8, -2.0, 0.1],
+    [-0.3, -2.5, 0.1],
+    [0.3, -2.5, 0.1],
 ]
+TARGETS_PER_EVAL = 2 
 
 # Global constants
 # Get file name and location to create data save folder.
@@ -101,6 +110,7 @@ class Network(nn.Module):
     ) -> None:
         super(Network, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc_recurrent = nn.Linear(hidden_size, hidden_size, bias=False)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc4 = nn.Linear(hidden_size, output_size)
 
@@ -108,21 +118,34 @@ class Network(nn.Module):
         self.output_activation = nn.Tanh()
 
         self.input = input_size
+        self.hidden_size = hidden_size
+        self._h = None       # persistent hidden state
 
-        # Disable gradients for all parameters
         for param in self.parameters():
             param.requires_grad = False
+
+    def reset_hidden(self) -> None:
+        """Call once at the start of each episode."""
+        self._h = torch.zeros(self.hidden_size)
 
     @torch.inference_mode()
     def forward(self, model, data, state):
         x = torch.Tensor(state)
 
-        x = self.hidden_activation(self.fc1(x))
-        x = self.hidden_activation(self.fc2(x))
-        x = self.output_activation(self.fc4(x)) * (torch.pi / 2)
+        if self._h is None:
+            self.reset_hidden()
 
-        return x.detach().numpy()
-
+        # Layer 1 + recurrent feedback
+        h = self.hidden_activation(
+            self.fc1(x) + self.fc_recurrent(self._h)
+        )
+        # Layer 2
+        h = self.hidden_activation(self.fc2(h))
+        # Store for next timestep
+        self._h = torch.tanh(h).detach().clone()
+        # Output
+        out = self.output_activation(self.fc4(h)) * (torch.pi / 2)
+        return out.detach().numpy()
 
 @torch.no_grad()
 def fill_parameters(net: nn.Module, vector: torch.Tensor) -> None:
@@ -173,23 +196,40 @@ def isolate_green(frame: np.ndarray) -> np.ndarray:
     return green_mask
 
 
-def analyze_sections(green_mask):
-    sections = np.array_split(green_mask, 3, axis=1)
-    left_section, middle_section, right_section = sections[0], sections[1], sections[2]
+def analyze_sections(green_mask) -> list[float]:
+    """Extract 7 vision features from the green mask.
+    
+    Returns:
+        [strip_0, strip_1, strip_2, strip_3, strip_4,
+         centroid_x,      # -1.0 (far left) to +1.0 (far right)
+         area_fraction]   # 0.0 (invisible) to 1.0 (fills frame)
+    """
+    h, w = green_mask.shape
 
-    # Calculate percentage of green pixels in each section
-    def get_green_percentage(section):
-        total_pixels = section.size
-        if total_pixels == 0:
-            return 0.0
-        green_pixels = cv2.countNonZero(section)
-        return (green_pixels / total_pixels)
+    # 5 vertical strips for finer angular resolution
+    num_strips = 5
+    sections = np.array_split(green_mask, num_strips, axis=1)
+    strip_pcts = []
+    for section in sections:
+        total = section.size
+        if total == 0:
+            strip_pcts.append(0.0)
+        else:
+            strip_pcts.append(float(cv2.countNonZero(section)) / total)
 
-    left_percent = get_green_percentage(left_section)
-    middle_percent = get_green_percentage(middle_section)
-    right_percent = get_green_percentage(right_section)
+    # Centroid X: where is the green blob horizontally?
+    total_green = cv2.countNonZero(green_mask)
+    if total_green > 0:
+        moments = cv2.moments(green_mask)
+        cx = moments["m10"] / moments["m00"]   # pixel x
+        centroid_x = (cx / w) * 2.0 - 1.0      # normalise to [-1, 1]
+    else:
+        centroid_x = 0.0
 
-    return [left_percent, middle_percent, right_percent]
+    # Area fraction: how much of the frame is green? (distance proxy)
+    area_fraction = float(total_green) / float(h * w)
+
+    return strip_pcts + [centroid_x, area_fraction]
 
 
 # Custom simulation runner with camera
@@ -217,7 +257,7 @@ def run_vision_simulation(
             renderer = mujoco.Renderer(model, height=24, width=32)
             created_renderer = True
         except Exception:
-            console.log("[yellow]run_vision_simulation: renderer init failed; running without vision.[/yellow]")
+            print("[yellow]run_vision_simulation: renderer init failed; running without vision.[/yellow]")
             renderer = None
             created_renderer = False
 
@@ -248,6 +288,9 @@ def run_vision_simulation(
     prev_planar_distance: Optional[float] = None
     if target_position is not None:
         prev_planar_distance = float(np.linalg.norm(last_pos[:2] - np.asarray(target_position)[:2]))
+    
+    # reset recurrent hidden state for this episode
+    network.reset_hidden()
 
     while data.time < duration:
         # Calculate deduced step count (Optimization from controller.py)
@@ -265,9 +308,9 @@ def run_vision_simulation(
                     vision_inputs = analyze_sections(mask)
                 except Exception:
                     # Renderer failed mid-run; fall back to zeros
-                    vision_inputs = [0.0, 0.0, 0.0]
+                    vision_inputs = [0.0] * 7
             else:
-                vision_inputs = [0.0, 0.0, 0.0]
+                vision_inputs = [0.0] * 7
 
             # 3. Prepare Inputs
             robot_state = get_robot_state(data)
@@ -288,7 +331,7 @@ def run_vision_simulation(
 
             # 4. Network Forward Pass
             current_action = network.forward(model, data, state_input)
-            trajectory.append((data.qpos[0], data.qpos[1]))
+            trajectory.append((data.qpos[0], data.qpos[1], battery))
 
         # 5. Apply Control (Hold previous action if not a control step)
         data.ctrl[:] = current_action
@@ -428,9 +471,17 @@ def actor_fitness(net) -> float:
     robot_cam_name = _ACTOR_ENV.get("robot_cam_name", None)
     target_mocap_id = _ACTOR_ENV.get("target_mocap_id", 0)
 
+     # Sample a subset of targets for this evaluation
+    rng = np.random.default_rng()
+    eval_targets = [
+        TARGET_POSITIONS[i]
+        for i in rng.choice(len(TARGET_POSITIONS), size=TARGETS_PER_EVAL, replace=False)
+    ]
+
+    
     total_fitness = 0.0
 
-    for target_pos in TARGET_POSITIONS:
+    for target_pos in eval_targets:
         mujoco.mj_resetData(model, data)
 
         # Place target for this episode
@@ -444,41 +495,34 @@ def actor_fitness(net) -> float:
             target_position=np.asarray(target_pos),
             renderer=renderer,
             cam_name=robot_cam_name,
+             initial_battery=1.0,
             control_step_freq=50,
         )
+        
+        # Exploration (minimize )
+        exploration = -float(metrics.get("path_length", 0.0))
+        
+        # Homing quality (shaped approach when low)
+        # shaped_homing accumulates distance-reductions → negate
+        homing = -float(metrics.get("shaped_homing", 0.0))
 
-        final_pos = np.array(data.qpos[0:3].copy())
-        final_z_height = final_pos[2]
+        # bComponent 3: Final proximity to target
+        final_dist = float(metrics["min_distance_to_target"])
 
-        final_battery = metrics.get("final_battery", 0.0)
-        battery_threshold = 0.3
-        battery_low = final_battery <= battery_threshold
+        # Component 4: Arrival bonus
+        arrival = -5.0 if metrics["time_to_target"] is not None else 0.0
 
-        if battery_low:
-            if args.fitness == "delta":
-                score = fitness_delta_distance(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos))
-            elif args.fitness == "distance":
-                score = distance_to_target(final_pos, np.asarray(target_pos))
-            elif args.fitness == "survival":
-                score = fitness_survival_and_locomotion(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos), final_z_height)
-            elif args.fitness == "efficiency":
-                score = fitness_distance_and_efficiency(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos), 0.0)
-            elif args.fitness == "direct":
-                score = fitness_direct_path(np.array([0.0, 0.0, 0.0]), final_pos, np.asarray(target_pos), metrics.get("path_length", 0.0))
-            elif args.fitness == "speed":
-                score = fitness_speed_to_target(
-                    time_to_target=metrics.get("time_to_target", None),
-                    duration=DURATION,
-                    min_distance_to_target=metrics.get("min_distance_to_target", float("inf")),
-                )
-            else:
-                score = distance_to_target(final_pos, np.asarray(target_pos))
+        # Stability (penalise flipping)
+        final_z = float(data.qpos[2])
+        flip_penalty = 2.0 if final_z < 0.02 else 0.0
 
-            shaped = float(metrics.get("shaped_homing", 0.0))
-            score = float(score) - shaped
-        else:
-            score = -float(metrics.get("path_length", 0.0))
-
+        score = (
+            0.3 * exploration
+            + 1.0 * homing
+            + 2.0 * final_dist
+            + arrival
+            + flip_penalty
+        )
         total_fitness += score
 
     return total_fitness / len(TARGET_POSITIONS)
@@ -491,8 +535,6 @@ def actor_fitness(net) -> float:
 def evolve(world, model, data) -> list[float]:
 
     """Evolve the robot's movement using an evolutionary algorithm."""
-    tracker = Tracker(mujoco_obj_to_find=data, observable_attributes=["xpos"])
-    tracker.setup(world.spec, data)
 
     # Identify Camera for ROBOT VISION (on the robot)
     robot_cam_name = None
@@ -503,109 +545,32 @@ def evolve(world, model, data) -> list[float]:
             break
     if robot_cam_name is None and model.ncam > 0:
         robot_cam_name = model.camera(0).name
-
-    # Pre-initialize renderer for the evolution loop (best-effort).
-    # In headless environments renderer creation may fail; fall back to None.
-    try:
-        renderer = mujoco.Renderer(model, height=24, width=32)
-    except Exception:
-        console.log("[yellow]Renderer init failed; running evolution without pre-created renderer.[/yellow]")
+    
+    # Create a renderer when actor = 1
+    # When actor >1, each actor 
+    if args.num_actors is None and args.num_actors <= 1:
+        try:
+            renderer = mujoco.Renderer(model, height=24, width=32)
+        except Exception:
+            print("Renderer init failed. Running without vision.")
+            renderer = None
+    else:
         renderer = None
 
     # Get Mocap ID for the charging station
     try:
         target_mocap_id = model.body("charging_station").mocapid[0]
     except:
-        console.print("[red]Error: Charging station mocap body not found![/red]")
+        print("[red]Error: Charging station mocap body not found![/red]")
         target_mocap_id = 0
 
-    # Define the fitness function
-    def fitness_function(x: Network) -> float:
-        
-        total_fitness = 0.0
-
-        for target_pos in TARGET_POSITIONS:
-            mujoco.mj_resetData(model, data)
-            tracker.reset()
-
-            data.mocap_pos[target_mocap_id] = target_pos
-
-            # 1. Capture Initial State BEFORE simulation
-            initial_pos = np.array(data.qpos[0:3].copy())
-            target_pos_arr = np.array(target_pos)
-
-            # Run Simulation
-            metrics = run_vision_simulation(
-                model,
-                data,
-                network=x,
-                duration=DURATION,
-                target_position=target_pos_arr,
-                renderer=renderer,
-                cam_name=robot_cam_name,
-                control_step_freq=50,
-            )
-
-            # 2. Capture Final State AFTER simulation
-            final_pos = np.array(data.qpos[0:3].copy())
-            final_z_height = final_pos[2]
-
-            # Conditional fitness: only reward homing when battery is low
-            final_battery = metrics.get("final_battery", 0.0)
-            battery_threshold = 0.3
-            battery_low = final_battery <= battery_threshold
-
-            if battery_low:
-                # When battery low, reward homing according to selected fitness
-                if args.fitness == "delta":
-                    score = fitness_delta_distance(initial_pos,
-                                                   final_pos,
-                                                   target_pos_arr)
-                elif args.fitness == "distance":
-                    score = distance_to_target(final_pos, target_pos_arr)
-                elif args.fitness == "survival":
-                    score = fitness_survival_and_locomotion(initial_pos,
-                                                            final_pos,
-                                                            target_pos_arr,
-                                                            final_z_height)
-                elif args.fitness == "efficiency":
-                    score = fitness_distance_and_efficiency(initial_pos,
-                                                            final_pos,
-                                                            target_pos_arr,
-                                                            0.0)
-                elif args.fitness == "direct":
-                    score = fitness_direct_path(initial_pos,
-                                                final_pos,
-                                                target_pos_arr,
-                                                metrics["path_length"])
-                elif args.fitness == "speed":
-                    score = fitness_speed_to_target(
-                        time_to_target=metrics["time_to_target"],
-                        duration=DURATION,
-                        min_distance_to_target=metrics["min_distance_to_target"],
-                    )
-                else:
-                    score = distance_to_target(final_pos, target_pos_arr)
-                # Apply shaped homing bonus (reduces score since lower is better)
-                shaped = float(metrics.get("shaped_homing", 0.0))
-                score = float(score) - shaped
-            else:
-                # Battery not low -> prioritize locomotion/exploration
-                # (longer path is better)
-                score = -float(metrics.get("path_length", 0.0))
-
-            total_fitness += score
-
-        return total_fitness / len(TARGET_POSITIONS)
-
-    console.log(f"Evolving for {BUDGET} generations with Vision Input")
+    print(f"Evolving for {BUDGET} generations with Vision Input")
 
     # --- CALCULATE NEW INPUT SIZE ---
     num_joints = len(data.qpos) - 7
 
-    # Inputs: Quat(3) + Joints(N) + Vision(3) + Heartbeat(2) + Battery(1)
-    # In case of the spider: 3 + 8 + 3 + 2 + 1
-    input_dim = 3 + num_joints + 3 + 2 + 1
+    # Inputs: Quat(3) + Joints(N) + Vision(7) + Heartbeat(2) + Battery(1)
+    input_dim = 3 + num_joints + 7 + 2 + 1
 
     # Initialise Neural Network Controller
     # 14 input neurons
@@ -614,7 +579,7 @@ def evolve(world, model, data) -> list[float]:
     network = Network(
         input_size=input_dim,
         output_size=model.nu,
-        hidden_size=32,
+        hidden_size=16,
     )
 
     # Initialise Problem for the solver/learner
@@ -649,24 +614,51 @@ def evolve(world, model, data) -> list[float]:
 
     # Initialise CMA-ES learner
     searcher = CMAES(problem=problem,
-                     stdev_init=0.075,
+                     stdev_init=0.3,
                      popsize=POP_SIZE,
                      )
 
-    console.log(f"Population size: {searcher.popsize}")
+    print(f"Population size: {searcher.popsize}")
+    
+    gen_best_history: list[float] = []
 
     for bud in range(BUDGET + 1):
         searcher.step()
-        gen_best = searcher.status["pop_best_eval"]
+        gen_best = float(searcher.status["pop_best_eval"])
+        gen_best_history.append(gen_best)
 
-        console.rule(f"Budget: {bud}/{BUDGET}")
-        console.log(f"Best Fit (Avg): {gen_best:.4f}")
+        print(f"Budget: {bud}/{BUDGET}")
+        print(f"Best Fit: {gen_best:.4f}")
+
+        # Periodic checkpoint every 25 generations
+        if bud > 0 and bud % 25 == 0:
+            ckpt_path = str(DATA / f"checkpoint_gen{bud}.npy")
+            np.save(ckpt_path, searcher.status["best"].values.numpy())
+            print(f"[dim]Checkpoint saved → {ckpt_path}[/dim]")
+
+    # Save full fitness history
+    np.save(str(DATA / "fitness_history.npy"),
+            np.array(gen_best_history))
+
+    # Plot fitness curve
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(gen_best_history, "b-", linewidth=2, label="Best fitness")
+    ax.set_xlabel("Generation")
+    ax.set_ylabel("Fitness (lower = better)")
+    ax.set_title("Fitness Over Generations")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.savefig(str(DATA / "fitness_curve.png"),
+                dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[green]Fitness curve saved → {DATA / 'fitness_curve.png'}[/green]")
 
     # Close the renderer pre-initialized for evolution to free EGL resources
-    try:
-        renderer.close()
-    except Exception:
-        pass
+    if renderer is not None:
+        try:
+            renderer.close()
+        except Exception:
+            pass
 
     best_ind = searcher.status["best"].values
     return best_ind, input_dim
@@ -716,12 +708,12 @@ if __name__ == "__main__":
     model, data, best_weights, world, input_dim = main()
     end = time.time()
 
-    console.log(f"Evolution took {(end - start) / 60:.2f} minutes")
+    print(f"Evolution took {(end - start) / 60:.2f} minutes")
 
     weights_path = "3_baby_vision_new.npy"
     # Unconditionally save the new weights, overwriting any old ones
     np.save(weights_path, best_weights)
-    console.log(f"Best weights saved to {weights_path}")
+    print(f"Best weights saved to {weights_path}")
 
 # ============================================================================ #
 #                           Initialise world and                               #
@@ -731,7 +723,7 @@ if __name__ == "__main__":
     network = Network(
         input_size=input_dim,
         output_size=model.nu,
-        hidden_size=32,
+        hidden_size=16,
     )
     fill_parameters(network, torch.Tensor(best_weights))
 
@@ -744,10 +736,11 @@ if __name__ == "__main__":
             robot_cam_name = cam_name
             break
 
-    console.log("Rendering Best Video...")
+    print("Rendering Best Video...")
     path_to_video_folder = str(DATA / "videos")
 
     mujoco.mj_resetData(model, data)
+    network.reset_hidden()
 
     # Set target to middle position for the video demo
     target_mocap_id = model.body("charging_station").mocapid[0]
@@ -757,7 +750,7 @@ if __name__ == "__main__":
     try:
         control_renderer = mujoco.Renderer(model, height=24, width=32)
     except Exception:
-        console.log("[yellow]control_renderer init failed; replay will run without low-res vision.[/yellow]")
+        print("[yellow]control_renderer init failed; replay will run without low-res vision.[/yellow]")
         control_renderer = None
 
     # 2. Renderer for Video Output (High Res)
@@ -771,9 +764,9 @@ if __name__ == "__main__":
                 mask = isolate_green(img)
                 vision_inputs = analyze_sections(mask)
             except Exception:
-                vision_inputs = [0, 0, 0]
+                vision_inputs =[0.0] * 7
         else:
-            vision_inputs = [0, 0, 0]
+            vision_inputs = [0.0] * 7
 
         robot_state = get_robot_state(d)
 
@@ -808,7 +801,7 @@ if __name__ == "__main__":
     current_ctrl = np.zeros(model.nu)
 
 # --- REPLAY BEST & RECORD VIDEO ---
-    console.log("Rendering Best Video...")
+    print("Rendering Best Video...")
     path_to_video_folder = str(DATA / "videos")
 
     # 1. Setup VideoRecorder (using your Ariel library class)
@@ -874,14 +867,15 @@ if __name__ == "__main__":
 
         # Finish recording
         video_recorder.release()
-        console.log(f"[green]Video rendering complete. Saved to {path_to_video_folder}[/green]")
+        print(f"[green]Video rendering complete. Saved to {path_to_video_folder}[/green]")
 
     else:
-        console.log("[yellow]High-res renderer unavailable; skipped video rendering.[/yellow]")
+        print("[yellow]High-res renderer unavailable; skipped video rendering.[/yellow]")
 
     # 9. Save Path Figure (run a deterministic evaluation for the plot)
     test_target = TARGET_POSITIONS[0]
     mujoco.mj_resetData(model, data)
+    network.reset_hidden()
     data.mocap_pos[target_mocap_id] = test_target
 
     metrics = run_vision_simulation(
@@ -896,24 +890,62 @@ if __name__ == "__main__":
         control_step_freq=50,
     )
 
-    # Extract X and Y coordinates
     path = metrics["trajectory"]
-    x_coords = [p[0] for p in path]
-    y_coords = [p[1] for p in path]
+    x_coords = np.array([p[0] for p in path])
+    y_coords = np.array([p[1] for p in path])
+    batt_vals = np.array([p[2] for p in path])
 
-    # Create the plot
-    plt.figure(figsize=(8, 8))
-    plt.plot(x_coords[0], y_coords[0], "go", markersize=10, label="Start")
-    plt.plot(test_target[0], test_target[1], "r*", markersize=15, label="Target")
-    plt.plot(x_coords, y_coords, "b-", linewidth=2, label="Robot Path")
-    plt.title(f"Robot Trajectory Map (Fitness: {args.fitness})")
-    plt.xlabel("X Position (meters)")
-    plt.ylabel("Y Position (meters)")
-    plt.legend()
-    plt.grid(True)
-    plot_path = os.path.join(path_to_video_folder, f"trajectory_{args.fitness}.png")
-    plt.savefig(plot_path)
-    console.log(f"[green]Trajectory map saved to {plot_path}[/green]")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+
+    # ── Left: Battery-coloured trajectory ──
+    points = np.column_stack([x_coords, y_coords]).reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+    cmap = LinearSegmentedColormap.from_list("batt", ["red", "orange", "green"])
+    lc = LineCollection(segments, cmap=cmap, linewidth=2.5)
+    lc.set_array(batt_vals[:-1])
+    ax1.add_collection(lc)
+    ax1.plot(x_coords[0], y_coords[0], "o", color="green",
+             markersize=12, label="Start", zorder=5)
+    ax1.plot(test_target[0], test_target[1], "*", color="red",
+             markersize=18, label="Charging Station", zorder=5)
+    ax1.autoscale()
+    ax1.set_aspect("equal")
+    ax1.set_xlabel("X (m)")
+    ax1.set_ylabel("Y (m)")
+    ax1.set_title("Trajectory (coloured by battery level)")
+    ax1.legend(loc="upper left")
+    ax1.grid(True, alpha=0.3)
+    fig.colorbar(lc, ax=ax1, label="Battery Level")
+
+    # ── Right: Battery & distance over time ──
+    n_pts = len(path)
+    times = np.linspace(0, DURATION, n_pts)
+    dists = np.sqrt(
+        (x_coords - test_target[0])**2 + (y_coords - test_target[1])**2
+    )
+    ax2.plot(times, batt_vals, "g-", linewidth=2, label="Battery")
+    ax2.axhline(y=0.3, color="orange", linestyle="--",
+                alpha=0.7, label="Low-battery threshold")
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylabel("Battery Level", color="green")
+    ax2.tick_params(axis="y", labelcolor="green")
+
+    ax2r = ax2.twinx()
+    ax2r.plot(times, dists, "r-", linewidth=2, label="Distance to station")
+    ax2r.set_ylabel("Distance (m)", color="red")
+    ax2r.tick_params(axis="y", labelcolor="red")
+
+    ax2.set_title("Battery & Distance Over Time")
+    h1, l1 = ax2.get_legend_handles_labels()
+    h2, l2 = ax2r.get_legend_handles_labels()
+    ax2.legend(h1 + h2, l1 + l2, loc="upper right")
+    ax2.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    plot_path = os.path.join(path_to_video_folder, "trajectory_battery.png")
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[green]Trajectory + battery plot saved → {plot_path}[/green]")
 
     # Cleanup control renderer used for low-res vision
     try:
