@@ -8,24 +8,6 @@ import mujoco
 import numpy as np
 from mujoco import viewer
 
-# ARIEL — module primitives (for manual assembly)
-from ariel.body_phenotypes.robogen_lite.config import ModuleFaces
-from ariel.body_phenotypes.robogen_lite.constructor import (
-    construct_mjspec_from_graph,
-)
-from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
-    HighProbabilityDecoder,
-)
-from ariel.body_phenotypes.robogen_lite.modules.brick import BrickModule
-from ariel.body_phenotypes.robogen_lite.modules.core import CoreModule
-from ariel.body_phenotypes.robogen_lite.modules.hinge import HingeModule
-
-# ARIEL — prebuilt robot bodies
-from ariel.body_phenotypes.robogen_lite.prebuilt_robots.gecko import gecko
-
-# ARIEL — genotype-to-phenotype pipeline
-from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
-
 # ARIEL — controller
 from ariel.simulation.controllers.controller import Controller
 from ariel.simulation.controllers.na_cpg import (
@@ -43,9 +25,12 @@ from ariel.utils.tracker import Tracker
 # Always reset the control callback before building a new simulation.
 mujoco.set_mjcb_control(None)
 
+
+
+
 # Create the world
 world = SimpleFlatWorld()
-# # Create the robot body
+# Create the robot body
 baby_robot = baby_robot()
 # Spawn the robot at the origin
 world.spawn(baby_robot.spec,position=[0,0,0])
