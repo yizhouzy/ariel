@@ -1,0 +1,445 @@
+"""Stage 1: Evolve a gait controller for the Baby robot.
+
+The gait network takes joint state + phase + turn/speed signals
+and produces joint commands. It is evolved with CMA-ES to walk
+toward target positions placed at different angles.
+"""
+# import os
+# os.environ["MUJOCO_GL"] = "egl"
+
+# External libraries
+from pathlib import Path
+import time, argparse
+import numpy as np
+import mujoco
+import torch
+from torch import nn
+from evotorch.algorithms import CMAES
+from evotorch.neuroevolution import NEProblem
+import matplotlib.pyplot as plt
+
+# Ariel framework
+from ariel.simulation.environments import SimpleFlatWorld
+from ariel.simulation.controllers.utils.data_get import (
+    get_state_from_data as get_robot_state,
+)
+from ariel.simulation.controllers.na_cpg import (
+    NaCPG,
+    create_fully_connected_adjacency,
+)
+from baby_robot import baby_robot
+
+# CLI arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--budget", type=int, default=300)  # number of generators for the algorithm
+parser.add_argument("--population", type=int, default=50)  # population size per generation
+parser.add_argument("--dur", type=int, default=10)  #Episode duration in seconds
+parser.add_argument("--num-actors", type=int, default=1)  # parallel workers
+args = parser.parse_args()
+
+BUDGET = args.budget
+DURATION = args.dur
+POP_SIZE = args.population
+
+DATA = Path("__data__/gait_cmaes")  #output directory for checkpoints
+DATA.mkdir(parents=True, exist_ok=True)
+
+# Target positions: different directions at ~2m distance
+# The gait network receives a "turn signal" derived from the
+# angle to the target, so it must learn to steer.
+GAIT_TARGETS = [
+    [0.0, -2.0, 0.1],     # straight ahead
+    [-1.5, -1.5, 0.1],    # 45° left
+    [1.5, -1.5, 0.1],     # 45° right
+    [-2.0, 0.0, 0.1],     # 90° left
+    [2.0, 0.0, 0.1],      # 90° right
+]
+# TODO are this really make sense??? the angle of the target should be handled by the rotation I think, which means it only have to learn the 
+
+# ---------- CPG Gait Controller ----------
+class CPGGaitController(nn.Module):
+    """NaCPG-based locomotion controller with external turn/speed modulation.
+
+    The NaCPG generates autonomous rhythmic patterns — one coupled
+    oscillator per joint.  Turn and speed signals modulate the base
+    rhythm externally:
+      - turn  → left/right amplitude asymmetry for steering
+      - speed → global amplitude scaling
+
+    This replaces the RNN GaitNetwork with a biologically-inspired CPG
+    that has far fewer parameters (5 × num_joints instead of hundreds).
+    """
+    def __init__(self, num_joints, dt=0.02):
+        super().__init__()
+        adj_dict = create_fully_connected_adjacency(num_joints)
+        self.cpg = NaCPG(adj_dict, dt=dt)
+        side_sign = torch.tensor(
+            [1.0 if i % 2 == 0 else -1.0 for i in range(num_joints)]
+        )
+        self.register_buffer('side_sign', side_sign)
+        for p in self.cpg.parameters():
+            p.requires_grad = False
+
+    def reset_hidden(self):
+        self.cpg.reset()
+
+    @torch.inference_mode()
+    def forward(self, state):
+        # state layout: [robot_state..., phase_sin, phase_cos, turn, speed]
+        turn = float(state[-2])
+        speed = float(state[-1])
+
+        angles = self.cpg.forward(time=None)
+        modulated = angles * speed + self.side_sign * turn * 0.5
+        modulated = torch.clamp(modulated, -torch.pi / 2, torch.pi / 2)
+        return modulated.detach().numpy()
+
+
+def compute_turn_signal(robot_pos, robot_quat, target_pos):
+    """Compute a [-1, +1] turn signal: which direction to turn to face target.
+    
+    Uses the robot's yaw (from quaternion) and the angle to the target.
+    +1 = target is to the right, -1 = target is to the left.
+    """
+    dx = target_pos[0] - robot_pos[0]
+    dy = target_pos[1] - robot_pos[1]
+    target_angle = np.arctan2(dy, dx)
+    
+    # Extract yaw from quaternion (quat = [w, x, y, z])
+    w, x, y, z = robot_quat
+    robot_yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y**2 + z**2))
+    
+    # Angle difference, normalized to [-pi, pi]
+    angle_diff = target_angle - robot_yaw
+    angle_diff = (angle_diff + np.pi) % (2 * np.pi) - np.pi
+    
+    # Clamp to [-1, 1]
+    return float(np.clip(angle_diff / np.pi, -1.0, 1.0))
+
+
+def run_gait_episode(model, data, network, duration, target_pos):
+    """Run one episode of gait training. Returns distance to target at end."""
+    network.reset_hidden()
+    timestep = model.opt.timestep
+    control_freq = 25  # how often to update the action (in terms of simulation steps)  
+    current_action = np.zeros(model.nu)
+
+    # Track action changes
+    prev_action = np.zeros(model.nu)
+    action_smoothness_cost = 0.0
+    n_control_steps = 0
+
+    while data.time < duration:
+        step = int(np.ceil(data.time / timestep))
+        if step % control_freq == 0:
+            robot_state = get_robot_state(data)
+            gait_freq = 3.0  # 3 Hz gait cycle
+            phase = [
+                2 * np.sin(data.time * gait_freq * 2.0 * np.pi),
+                2 * np.cos(data.time * gait_freq * 2.0 * np.pi),
+            ]
+
+            # Action smoothness penalty
+            action_smoothness_cost += np.sum((current_action - prev_action) ** 2)
+            prev_action = current_action.copy()
+            n_control_steps += 1
+            
+            # Compute turn signal from known target position
+            # (Stage 2 will replace this signal with one derived from vision.)
+            robot_pos = data.qpos[:3].copy()
+            robot_quat = data.qpos[3:7].copy()
+            turn = compute_turn_signal(robot_pos, robot_quat, target_pos)
+            turn = np.random.normal(0, 0.15) # add noise to simulate imperfect steering
+            turn = float(np.clip(turn, -1.0, 1.0))
+            speed = 1.0  # always full speed during gait training
+            
+            state = np.concatenate([
+                robot_state, phase, [turn, speed]
+            ]).astype(np.float32)
+            
+            current_action = network.forward(state)
+            if not np.all(np.isfinite(current_action)):
+                current_action = np.zeros(model.nu)
+
+        data.ctrl[:] = current_action
+        mujoco.mj_step(model, data)
+
+    final_pos = data.qpos[:2].copy()
+    final_dist = float(np.linalg.norm(final_pos - np.asarray(target_pos)[:2]))
+    final_z = float(data.qpos[2])
+    avg_smoothness = action_smoothness_cost / max(n_control_steps, 1)
+    
+    return final_dist, final_z, avg_smoothness
+
+
+# ─── Actor-local environment ───
+_GAIT_ENV: dict = {}
+
+def _init_gait_env():
+    if _GAIT_ENV:
+        return
+    world = SimpleFlatWorld()
+    
+    # No charging station needed — just the robot and a flat arena
+    baby_core = baby_robot()
+    world.spawn(baby_core.spec, position=[0, 0, 0.1])
+    
+    model = world.spec.compile()
+    data = mujoco.MjData(model)
+    
+    _GAIT_ENV.update({"model": model, "data": data})
+
+
+def gait_fitness(net) -> float:
+    """Fitness: average final distance across all target directions."""
+    _init_gait_env()
+    model = _GAIT_ENV["model"]
+    data = _GAIT_ENV["data"]
+    
+    total = 0.0
+    for target in GAIT_TARGETS:
+        mujoco.mj_resetData(model, data)
+        final_dist, final_z, avg_smoothness = run_gait_episode(
+            model, data, net, DURATION, target
+        )
+
+        flip_penalty = 5.0 if final_z < 0.02 else 0.0
+        total += 5.0 * final_dist + flip_penalty + 0.5 * avg_smoothness
+    
+    return total / len(GAIT_TARGETS)
+
+
+def main():
+    # Build a temporary model to get dimensions
+    world = SimpleFlatWorld()
+    baby_core = baby_robot()
+    world.spawn(baby_core.spec, position=[0, 0, 0.1])
+    model = world.spec.compile()
+    data = mujoco.MjData(model)
+    
+    num_joints = len(data.qpos) - 7
+    # CPG controller: one oscillator per joint, dt matches control period
+    dt = model.opt.timestep * 25  # control every 25 steps
+
+    network = CPGGaitController(num_joints, dt=dt)
+    n_params = sum(p.numel() for p in network.parameters())
+    print(f"CPG gait controller: {num_joints} joints, {n_params} params "
+          f"(5 × {num_joints} = {5 * num_joints})")
+    
+    # Configure parallelism
+    num_actors_cfg = args.num_actors if args.num_actors > 1 else None
+    actor_config = None
+    if num_actors_cfg:
+        actor_config = {
+            "num_cpus": 1,
+            "runtime_env": {"excludes": [".git", ".venv", "__pycache__"]},
+        }
+    
+    problem = NEProblem(
+        objective_sense="min",
+        network_eval_func=gait_fitness,
+        network=network.eval(),
+        initial_bounds=(-0.5, 0.5),
+        device="cpu",
+        num_actors=num_actors_cfg,
+        actor_config=actor_config,
+    )
+    
+    searcher = CMAES(problem=problem, stdev_init=0.3, popsize=POP_SIZE)
+    print(f"Pop size: {searcher.popsize}")
+    
+    history = []
+    for gen in range(BUDGET + 1):
+        searcher.step()
+        best = float(searcher.status["pop_best_eval"])
+        history.append(best)
+        if gen % 10 == 0:
+            print(f"Gen {gen}/{BUDGET} — Best: {best:.4f}")
+        if gen > 0 and gen % 50 == 0:
+            np.save(str(DATA / f"gait_ckpt_gen{gen}.npy"),
+                    searcher.status["best"].values.numpy())
+    
+    # Save best weights
+    best_weights = searcher.status["best"].values.numpy()
+    np.save(str(DATA / "gait_best.npy"), best_weights)
+    print(f"Saved gait weights → {DATA / 'gait_best.npy'}")
+    
+    # Save metadata so Stage 2 can reconstruct the CPG controller
+    np.savez(str(DATA / "gait_meta.npz"),
+             num_joints=num_joints,
+             dt=dt)
+    
+    # Plot
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(history, "b-", linewidth=1.5)
+    ax.set_xlabel("Generation")
+    ax.set_ylabel("Fitness (lower = better)")
+    ax.set_title("Stage 1: Gait Evolution")
+    ax.grid(True, alpha=0.3)
+    fig.savefig(str(DATA / "gait_fitness.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    start = time.time()
+    main()
+    print(f"Stage 1 took {(time.time() - start) / 60:.1f} minutes")
+
+    # ─── Demo video for Stage 1 ───
+    print("Recording Stage 1 demo video...")
+
+    from ariel.utils.renderers import VideoRecorder
+    from datetime import datetime
+
+    RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+    (DATA / "videos").mkdir(exist_ok=True)
+
+    # Rebuild environment with a visible target marker
+    world = SimpleFlatWorld()
+
+    # Add a visual target marker (not a charger, just a goal point)
+    demo_target = [0.0, -0.8, 0.1]
+    target_body = world.spec.worldbody.add_body(
+        name="target_marker", mocap=True, pos=demo_target)
+    target_body.add_geom(
+        type=mujoco.mjtGeom.mjGEOM_SPHERE,
+        size=[0.05, 0, 0],
+        rgba=[1, 0, 0, 1],  # red sphere
+    )
+
+    # Add overhead camera
+    world.spec.worldbody.add_camera(
+        name="video_cam",
+        pos=[0, -0.5, 2.0],
+        xyaxes=[1, 0, 0, 0, 2, 0],
+    )
+
+    baby_core = baby_robot()
+    world.spawn(baby_core.spec, position=[0, 0, 0.1])
+
+    model = world.spec.compile()
+    data = mujoco.MjData(model)
+
+    # Load best CPG weights
+    meta = np.load(str(DATA / "gait_meta.npz"))
+    num_joints = int(meta["num_joints"])
+    dt = float(meta["dt"])
+
+    gait_net = CPGGaitController(num_joints, dt=dt)
+    weights = np.load(str(DATA / "gait_best.npy"))
+    vec = torch.tensor(weights, dtype=torch.float32)
+    addr = 0
+    for p in gait_net.parameters():
+        d = p.data.view(-1)
+        n = len(d)
+        d[:] = vec[addr:addr + n]
+        addr += n
+
+    # Setup video
+    try:
+        vid_renderer = mujoco.Renderer(model, height=480, width=640)
+    except Exception:
+        vid_renderer = None
+        print("Video renderer unavailable, skipping.")
+
+    if vid_renderer is not None:
+        video_recorder = VideoRecorder(
+            file_name=f"gait_demo_{RUN_TIMESTAMP}",
+            output_folder=str(DATA / "videos"),
+        )
+
+        mujoco.mj_resetData(model, data)
+        gait_net.reset_hidden()
+
+        # Place target marker
+        mocap_id = model.body("target_marker").mocapid[0]
+        data.mocap_pos[mocap_id] = demo_target
+
+        dt = model.opt.timestep
+        fps = 30
+        steps_per_frame = int(1.0 / (fps * dt))
+        control_freq = 100 # every 100 physical steps = 5 Hz at timestep = 0.002
+        current_ctrl = np.zeros(model.nu)
+
+        camera_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_CAMERA, "video_cam")
+        viz = mujoco.MjvOption()
+        viz.flags[mujoco.mjtVisFlag.mjVIS_JOINT] = False
+
+        while data.time < DURATION:
+            for _ in range(steps_per_frame):
+                step = int(np.ceil(data.time / dt))
+                if step % control_freq == 0:
+                    robot_state = get_robot_state(data)
+                    phase = [
+                        2 * np.sin(data.time * 2.0 * np.pi),
+                        2 * np.cos(data.time * 2.0 * np.pi),
+                    ]
+                    robot_pos = data.qpos[:3].copy()
+                    robot_quat = data.qpos[3:7].copy()
+                    turn = compute_turn_signal(robot_pos, robot_quat, demo_target)
+                    speed = 1.0
+
+                    state = np.concatenate([
+                        robot_state, phase, [turn, speed]
+                    ]).astype(np.float32)
+
+                    current_ctrl = gait_net.forward(state)
+                    if not np.all(np.isfinite(current_ctrl)):
+                        current_ctrl = np.zeros(model.nu)
+
+                data.ctrl[:] = current_ctrl
+                mujoco.mj_step(model, data)
+
+            vid_renderer.update_scene(data, scene_option=viz, camera=camera_id)
+            video_recorder.write(frame=vid_renderer.render())
+
+        video_recorder.release()
+        vid_renderer.close()
+        print(f"Gait demo video saved → {DATA / 'videos'}")
+
+    # Also save a trajectory plot for Stage 1
+    mujoco.mj_resetData(model, data)
+    gait_net.reset_hidden()
+    data.mocap_pos[mocap_id] = demo_target
+    traj = []
+    current_ctrl = np.zeros(model.nu)
+
+    while data.time < DURATION:
+        step = int(np.ceil(data.time / dt))
+        if step % control_freq == 0:
+            robot_state = get_robot_state(data)
+            phase = [
+                2 * np.sin(data.time * 2.0 * np.pi),
+                2 * np.cos(data.time * 2.0 * np.pi),
+            ]
+            turn = compute_turn_signal(
+                data.qpos[:3].copy(), data.qpos[3:7].copy(), demo_target)
+            state = np.concatenate([
+                robot_state, phase, [turn, 1.0]
+            ]).astype(np.float32)
+            current_ctrl = gait_net.forward(state)
+            if not np.all(np.isfinite(current_ctrl)):
+                current_ctrl = np.zeros(model.nu)
+            traj.append((data.qpos[0], data.qpos[1]))
+        data.ctrl[:] = current_ctrl
+        mujoco.mj_step(model, data)
+
+    if traj:
+        xs = [p[0] for p in traj]
+        ys = [p[1] for p in traj]
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.plot(xs, ys, "b-", linewidth=2, label="Robot path")
+        ax.plot(xs[0], ys[0], "go", markersize=12, label="Start")
+        ax.plot(demo_target[0], demo_target[1], "r*",
+                markersize=18, label="Target")
+        ax.set_aspect("equal")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.set_title("Stage 1: Gait Demo Trajectory")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.savefig(str(DATA / f"gait_trajectory_{RUN_TIMESTAMP}.png"),
+                    dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Gait trajectory plot saved.")
