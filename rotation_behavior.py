@@ -229,9 +229,10 @@ def run_homing_episode(model, data, gait_net, steer_net, duration,
             
             # ── Gait network: joints + phase + turn + speed → joint cmds ──
             robot_state = get_robot_state(data)
+            gait_freq = 3.0  # 3 Hz gait cycle
             phase = [
-                2 * np.sin(data.time * 2.0 * np.pi),
-                2 * np.cos(data.time * 2.0 * np.pi),
+                2 * np.sin(data.time * gait_freq * 2.0 * np.pi),
+                2 * np.cos(data.time * gait_freq * 2.0 * np.pi),
             ]
             gait_input = np.concatenate([
                 robot_state, phase, [turn, speed]

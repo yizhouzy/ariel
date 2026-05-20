@@ -338,6 +338,13 @@ if __name__ == "__main__":
         vid_renderer = None
         print("Video renderer unavailable, skipping.")
 
+    # Place target marker (used by both video and trajectory plot)
+    mocap_id = model.body("target_marker").mocapid[0]
+    data.mocap_pos[mocap_id] = demo_target
+
+    physics_dt = model.opt.timestep
+    control_freq = 25  # must match training control_freq
+
     if vid_renderer is not None:
         video_recorder = VideoRecorder(
             file_name=f"gait_demo_{RUN_TIMESTAMP}",
@@ -347,14 +354,10 @@ if __name__ == "__main__":
         mujoco.mj_resetData(model, data)
         gait_net.reset_hidden()
 
-        # Place target marker
-        mocap_id = model.body("target_marker").mocapid[0]
         data.mocap_pos[mocap_id] = demo_target
 
-        dt = model.opt.timestep
         fps = 30
-        steps_per_frame = int(1.0 / (fps * dt))
-        control_freq = 100 # every 100 physical steps = 5 Hz at timestep = 0.002
+        steps_per_frame = int(1.0 / (fps * physics_dt))
         current_ctrl = np.zeros(model.nu)
 
         camera_id = mujoco.mj_name2id(
@@ -364,7 +367,7 @@ if __name__ == "__main__":
 
         while data.time < DURATION:
             for _ in range(steps_per_frame):
-                step = int(np.ceil(data.time / dt))
+                step = int(np.ceil(data.time / physics_dt))
                 if step % control_freq == 0:
                     robot_state = get_robot_state(data)
                     phase = [
@@ -402,7 +405,7 @@ if __name__ == "__main__":
     current_ctrl = np.zeros(model.nu)
 
     while data.time < DURATION:
-        step = int(np.ceil(data.time / dt))
+        step = int(np.ceil(data.time / physics_dt))
         if step % control_freq == 0:
             robot_state = get_robot_state(data)
             phase = [
