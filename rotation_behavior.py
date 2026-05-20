@@ -550,7 +550,8 @@ if __name__ == "__main__":
         control_freq = 50
         current_ctrl = np.zeros(model.nu)
         battery = 1.0
-        drain = dt / max(float(DURATION), 1.0)
+        base_drain = dt / DURATION
+        effort_drain = 0.001 * np.sum(np.abs(data.ctrl))
         
         camera_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_CAMERA, "video_cam")
@@ -587,7 +588,7 @@ if __name__ == "__main__":
                 
                 data.ctrl[:] = current_ctrl
                 mujoco.mj_step(model, data)
-                battery = max(0.0, battery - drain)
+                battery = max(0.0, battery - base_drain - effort_drain)
             
             vid_renderer.update_scene(data, scene_option=viz, camera=camera_id)
             video_recorder.write(frame=vid_renderer.render())
