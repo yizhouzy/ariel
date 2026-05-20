@@ -4,8 +4,8 @@ The gait network takes joint state + phase + turn/speed signals
 and produces joint commands. It is evolved with CMA-ES to walk
 toward target positions placed at different angles.
 """
-import os
-os.environ["MUJOCO_GL"] = "egl"
+# import os
+# os.environ["MUJOCO_GL"] = "egl"
 
 # External libraries
 from pathlib import Path
@@ -116,7 +116,7 @@ def run_gait_episode(model, data, network, duration, target_pos):
     """Run one episode of gait training. Returns distance to target at end."""
     network.reset_hidden()
     timestep = model.opt.timestep
-    control_freq = 50
+    control_freq = 25  # how often to update the action (in terms of simulation steps)  
     current_action = np.zeros(model.nu)
 
     # Track action changes
@@ -194,10 +194,10 @@ def gait_fitness(net) -> float:
     total = 0.0
     for target in GAIT_TARGETS:
         mujoco.mj_resetData(model, data)
-        final_dist, final_z = run_gait_episode(
+        final_dist, final_z, avg_smoothness = run_gait_episode(
             model, data, net, DURATION, target
         )
-        
+
         flip_penalty = 5.0 if final_z < 0.02 else 0.0
         total += 5.0 * final_dist + flip_penalty + 0.5 * avg_smoothness
     
@@ -356,14 +356,13 @@ if __name__ == "__main__":
         steps_per_frame = int(1.0 / (fps * dt))
         control_freq = 100 # every 100 physical steps = 5 Hz at timestep = 0.002
         current_ctrl = np.zeros(model.nu)
-        duration = 15  # match training duration
 
         camera_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_CAMERA, "video_cam")
         viz = mujoco.MjvOption()
         viz.flags[mujoco.mjtVisFlag.mjVIS_JOINT] = False
 
-        while data.time < duration:
+        while data.time < DURATION:
             for _ in range(steps_per_frame):
                 step = int(np.ceil(data.time / dt))
                 if step % control_freq == 0:
@@ -402,7 +401,7 @@ if __name__ == "__main__":
     traj = []
     current_ctrl = np.zeros(model.nu)
 
-    while data.time < duration:
+    while data.time < DURATION:
         step = int(np.ceil(data.time / dt))
         if step % control_freq == 0:
             robot_state = get_robot_state(data)
