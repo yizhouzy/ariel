@@ -29,10 +29,6 @@ from ariel.simulation.environments import SimpleFlatWorld
 from ariel.simulation.controllers.utils.data_get import (
     get_state_from_data as get_robot_state,
 )
-from ariel.simulation.controllers.na_cpg import (
-    NaCPG,
-    create_fully_connected_adjacency,
-)
 from ariel.utils.renderers import VideoRecorder
 from baby_robot import baby_robot
 
@@ -43,8 +39,8 @@ parser.add_argument("--population", type=int, default=50)
 parser.add_argument("--dur", type=int, default=45)
 parser.add_argument("--num-actors", type=int, default=1)
 parser.add_argument("--gait-weights", type=str,
-                    default="__data__/gait_cmaes/gait_best.npy",
-                    help="Path to Stage 1 CPG weights")
+                    default="__data__/train_gait/gait_best.npy",
+                    help="Path to Stage 1 gait weights")
 args = parser.parse_args()
 args.gait_weights = str(Path(args.gait_weights).resolve())
 
@@ -71,43 +67,43 @@ TARGET_POSITIONS = [
 BATTERY_THRESHOLD = 0.3
 
 
-# ─── CPG Gait Controller (frozen, loaded from Stage 1) ───
-class CPGGaitController(nn.Module):
-    """NaCPG-based locomotion controller with external turn/speed modulation."""
-    def __init__(self, num_joints, dt=0.02):
+# ─── Gait Network (frozen, loaded from Stage 1) ───
+class GaitNetwork(nn.Module):
+    def __init__(self, input_size, output_size, hidden_size=16):
         super().__init__()
-        adj_dict = create_fully_connected_adjacency(num_joints)
-        self.cpg = NaCPG(adj_dict, dt=dt)
-        side_sign = torch.tensor(
-            [1.0 if i % 2 == 0 else -1.0 for i in range(num_joints)]
-        )
-        self.register_buffer('side_sign', side_sign)
-        for p in self.cpg.parameters():
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc_rec = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc_out = nn.Linear(hidden_size, output_size)
+        self.hidden_size = hidden_size
+        self._h = None
+        for p in self.parameters():
             p.requires_grad = False
 
     def reset_hidden(self):
-        self.cpg.reset()
+        self._h = torch.zeros(self.hidden_size)
 
     @torch.inference_mode()
     def forward(self, state):
-        turn = float(state[-2])
-        speed = float(state[-1])
-        angles = self.cpg.forward(time=None)
-        modulated = angles * speed + self.side_sign * turn * 0.5
-        modulated = torch.clamp(modulated, -torch.pi / 2, torch.pi / 2)
-        return modulated.detach().numpy()
+        x = torch.tensor(state, dtype=torch.float32)
+        if self._h is None:
+            self.reset_hidden()
+        h = torch.nn.functional.elu(self.fc1(x) + self.fc_rec(self._h))
+        h = torch.nn.functional.elu(self.fc2(h))
+        self._h = torch.tanh(h).detach().clone()
+        return (torch.tanh(self.fc_out(h)) * (torch.pi / 2)).detach().numpy()
 
 
-def load_frozen_cpg(weights_path, num_joints, dt=0.02):
-    """Load Stage 1 CPG weights into a frozen CPGGaitController."""
-    net = CPGGaitController(num_joints, dt=dt)
+def load_frozen_gait(weights_path, input_dim, output_dim, hidden_size=16):
+    """Load Stage 1 gait weights into a frozen GaitNetwork."""
+    net = GaitNetwork(input_dim, output_dim, hidden_size)
     weights = np.load(weights_path)
     vec = torch.tensor(weights, dtype=torch.float32)
     addr = 0
     for p in net.parameters():
         d = p.data.view(-1)
         n = len(d)
-        d[:] = vec[addr:addr + n]
+        d[:] = vec[addr:addr+n]
         addr += n
     return net
 
@@ -316,12 +312,13 @@ def _init_homing_env():
     
     mocap_id = model.body("charging_station").mocapid[0]
     
-    # Load frozen CPG gait controller
-    meta = np.load(str(Path("__data__/gait_cmaes/gait_meta.npz").resolve()))
-    gait_net = load_frozen_cpg(
+    # Load frozen gait network
+    meta = np.load(str(Path("__data__/train_gait/gait_meta.npz").resolve()))
+    gait_net = load_frozen_gait(
         args.gait_weights,
-        int(meta["num_joints"]),
-        float(meta["dt"]),
+        int(meta["input_dim"]),
+        int(meta["output_dim"]),
+        int(meta["hidden_size"]),
     )
     
     _HOMING_ENV.update({
