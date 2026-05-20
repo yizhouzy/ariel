@@ -591,8 +591,10 @@ if __name__ == "__main__":
                 battery = max(0.0, battery - base_drain - effort_drain)
             
             vid_renderer.update_scene(data, scene_option=viz, camera=camera_id)
-            video_recorder.write(frame=vid_renderer.render())
-        
+            frame = vid_renderer.render().copy()
+            cv2.putText(frame, f"Battery: {battery:.0%}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            video_recorder.write(frame=frame)
         video_recorder.release()
         vid_renderer.close()
         print(f"Video saved → {DATA / 'videos'}")
