@@ -121,7 +121,7 @@ def run_gait_episode(model, data, network, duration, target_pos):
     """Run one episode of gait training. Returns distance to target at end."""
     network.reset_hidden()
     timestep = model.opt.timestep
-    control_freq = 25  # how often to update the action (in terms of simulation steps)  
+    control_step_freq = 25  # how often to update the action (in terms of simulation steps)  
     current_action = np.zeros(model.nu)
 
     # Track action changes
@@ -131,7 +131,7 @@ def run_gait_episode(model, data, network, duration, target_pos):
 
     while data.time < duration:
         step = int(np.ceil(data.time / timestep))
-        if step % control_freq == 0:
+        if step % control_step_freq == 0:
             robot_state = get_robot_state(data)
             gait_freq = 3.0  # 3 Hz gait cycle
             phase = [
