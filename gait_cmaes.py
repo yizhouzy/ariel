@@ -7,6 +7,7 @@ toward target positions placed at different angles.
 import os
 os.environ["MUJOCO_GL"] = "egl"
 
+# External libraries
 from pathlib import Path
 import time, argparse
 import numpy as np
@@ -17,42 +18,43 @@ from evotorch.algorithms import CMAES
 from evotorch.neuroevolution import NEProblem
 import matplotlib.pyplot as plt
 
+# Ariel framework
 from ariel.simulation.environments import SimpleFlatWorld
 from ariel.simulation.controllers.utils.data_get import (
     get_state_from_data as get_robot_state,
 )
 from baby_robot import baby_robot
 
-# ─── Args ───
+# CLI arguments
 parser = argparse.ArgumentParser()
-parser.add_argument("--budget", type=int, default=300)
-parser.add_argument("--population", type=int, default=50)
-parser.add_argument("--dur", type=int, default=10)
-parser.add_argument("--num-actors", type=int, default=1)
+parser.add_argument("--budget", type=int, default=300)  # number of generators for the algorithm
+parser.add_argument("--population", type=int, default=50)  # population size per generation
+parser.add_argument("--dur", type=int, default=10)  #Episode duration in seconds
+parser.add_argument("--num-actors", type=int, default=1)  # parallel workers
 args = parser.parse_args()
 
 BUDGET = args.budget
 DURATION = args.dur
 POP_SIZE = args.population
 
-DATA = Path("__data__/train_gait")
+DATA = Path("__data__/gait_cmaes")  #output directory for checkpoints
 DATA.mkdir(parents=True, exist_ok=True)
 
-# Target positions: different directions at ~1m distance
+# Target positions: different directions at ~2m distance
 # The gait network receives a "turn signal" derived from the
 # angle to the target, so it must learn to steer.
 GAIT_TARGETS = [
-    [0.0, -1.0, 0.1],     # straight ahead
-    [-0.7, -0.7, 0.1],    # 45° left
-    [0.7, -0.7, 0.1],     # 45° right
-    [-1.0, 0.0, 0.1],     # 90° left
-    [1.0, 0.0, 0.1],      # 90° right
+    [0.0, -2.0, 0.1],     # straight ahead
+    [-1.5, -1.5, 0.1],    # 45° left
+    [1.5, -1.5, 0.1],     # 45° right
+    [-2.0, 0.0, 0.1],     # 90° left
+    [2.0, 0.0, 0.1],      # 90° right
 ]
+# TODO are this really make sense??? the angle of the target should be handled by the rotation I think, which means it only have to learn the 
 
-
-# ─── Gait Network ───
+# ---------- Gait Network ----------
 class GaitNetwork(nn.Module):
-    """Small recurrent network for locomotion.
+    """Small RNN for locomotion.
     
     Inputs:
         - robot_state: joint angles + orientation (from get_robot_state)
@@ -117,22 +119,33 @@ def run_gait_episode(model, data, network, duration, target_pos):
     control_freq = 50
     current_action = np.zeros(model.nu)
 
+    # Track action changes
+    prev_action = np.zeros(model.nu)
+    action_smoothness_cost = 0.0
+    n_control_steps = 0
+
     while data.time < duration:
         step = int(np.ceil(data.time / timestep))
         if step % control_freq == 0:
             robot_state = get_robot_state(data)
+            gait_freq = 3.0  # 3 Hz gait cycle
             phase = [
-                2 * np.sin(data.time * 2.0 * np.pi),
-                2 * np.cos(data.time * 2.0 * np.pi),
+                2 * np.sin(data.time * gait_freq * 2.0 * np.pi),
+                2 * np.cos(data.time * gait_freq * 2.0 * np.pi),
             ]
+
+            # Action smoothness penalty
+            action_smoothness_cost += np.sum((current_action - prev_action) ** 2)
+            prev_action = current_action.copy()
+            n_control_steps += 1
             
             # Compute turn signal from known target position
-            # (In Stage 1 the robot "knows" where the target is —
-            #  this is NOT cheating because Stage 2 will replace
-            #  this signal with one derived from vision.)
+            # (Stage 2 will replace this signal with one derived from vision.)
             robot_pos = data.qpos[:3].copy()
             robot_quat = data.qpos[3:7].copy()
             turn = compute_turn_signal(robot_pos, robot_quat, target_pos)
+            turn = np.random.normal(0, 0.15) # add noise to simulate imperfect steering
+            turn = float(np.clip(turn, -1.0, 1.0))
             speed = 1.0  # always full speed during gait training
             
             state = np.concatenate([
@@ -149,8 +162,9 @@ def run_gait_episode(model, data, network, duration, target_pos):
     final_pos = data.qpos[:2].copy()
     final_dist = float(np.linalg.norm(final_pos - np.asarray(target_pos)[:2]))
     final_z = float(data.qpos[2])
+    avg_smoothness = action_smoothness_cost / max(n_control_steps, 1)
     
-    return final_dist, final_z
+    return final_dist, final_z, avg_smoothness
 
 
 # ─── Actor-local environment ───
@@ -185,7 +199,7 @@ def gait_fitness(net) -> float:
         )
         
         flip_penalty = 5.0 if final_z < 0.02 else 0.0
-        total += 5.0 * final_dist + flip_penalty
+        total += 5.0 * final_dist + flip_penalty + 0.5 * avg_smoothness
     
     return total / len(GAIT_TARGETS)
 
@@ -340,7 +354,7 @@ if __name__ == "__main__":
         dt = model.opt.timestep
         fps = 30
         steps_per_frame = int(1.0 / (fps * dt))
-        control_freq = 50
+        control_freq = 100 # every 100 physical steps = 5 Hz at timestep = 0.002
         current_ctrl = np.zeros(model.nu)
         duration = 15  # match training duration
 
