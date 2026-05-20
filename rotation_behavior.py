@@ -34,9 +34,9 @@ from baby_robot import baby_robot
 
 # ─── Args ───
 parser = argparse.ArgumentParser()
-parser.add_argument("--budget", type=int, default=200)
+parser.add_argument("--budget", type=int, default=600)
 parser.add_argument("--population", type=int, default=50)
-parser.add_argument("--dur", type=int, default=30)
+parser.add_argument("--dur", type=int, default=45)
 parser.add_argument("--num-actors", type=int, default=1)
 parser.add_argument("--gait-weights", type=str,
                     default="__data__/train_gait/gait_best.npy",
