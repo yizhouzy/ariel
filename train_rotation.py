@@ -10,7 +10,7 @@ The combined controller:
   output = joint_commands × enable
 """
 import os
-os.environ["MUJOCO_GL"] = "egl"
+# os.environ["MUJOCO_GL"] = "egl"
 
 from pathlib import Path
 from datetime import datetime
@@ -154,10 +154,10 @@ class SteeringNetwork(nn.Module):
 
 
 # ─── Vision processing (same as before) ───
-def isolate_green(frame):
+def isolate_orange(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
-    lower = np.array([25, 30, 30])
-    upper = np.array([95, 255, 255])
+    lower = np.array([15, 100, 100])
+    upper = np.array([25, 255, 255])
     return cv2.inRange(hsv, lower, upper)
 
 def analyze_sections(green_mask):
