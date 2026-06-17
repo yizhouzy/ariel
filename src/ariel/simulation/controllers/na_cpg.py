@@ -78,6 +78,8 @@ class NaCPG(nn.Module):
         alpha: float = 0.1,
         dt: float = 0.01,
         hard_bounds: tuple[float, float] | None = (-torch.pi / 2, torch.pi / 2),
+        h: float = 1.0,
+        cf_scale: float = 10.0,
         *,
         angle_tracking: bool = False,
         seed: int | None = None,
@@ -94,8 +96,13 @@ class NaCPG(nn.Module):
         dt : float, optional
             Time step for the CPG updates, by default 0.01.
         hard_bounds : tuple[float, float] | None, optional
-            If provided, the output angles will be clamped to these bounds. If None,
-            no clamping is applied, by default (-π/2, π/2).
+            If provided, the output angles will be clamped to these bounds. If
+            None, no clamping is applied, by default (-π/2, π/2).
+        h : float, optional
+            Coupling coefficient between connected oscillators, by default 1.0.
+        cf_scale : float, optional
+            Scale for the frequency-dependent derivative change constraint,
+            by default 10.0.
         angle_tracking : bool, optional
             If True, the history of output angles will be stored for analysis, by default False.
         seed : int | None, optional
@@ -123,6 +130,10 @@ class NaCPG(nn.Module):
 
         # Time step (dt)
         self.dt = dt
+        self.h = h
+        self.cf_scale = cf_scale
+        self.cf_bind_count = 0
+        self.cf_step_count = 0
 
         # ================================================================== #
         # Adaptable parameters
@@ -147,16 +158,11 @@ class NaCPG(nn.Module):
 
         # --- Probably not to adapt --- #
         self.ha = nn.Parameter(
-            torch.randn(self.n),
+            torch.rand(self.n) * 1.0 - 0.5,
             requires_grad=False,
         )
         self.b = nn.Parameter(
-            torch.randint(
-                -100,
-                100,
-                (self.n,),
-                dtype=torch.float32,
-            ),
+            torch.rand(self.n) * 1.0 - 0.5,
             requires_grad=False,
         )
         self.parameter_groups = {
@@ -174,25 +180,22 @@ class NaCPG(nn.Module):
         # ------------------------------------------------------------------ #
         self.register_buffer(
             "xy",
-            torch.randn(self.n, 2),
+            torch.zeros(self.n, 2),
         )
         self.register_buffer(
             "xy_dot_old",
-            torch.randn(self.n, 2),
+            torch.zeros(self.n, 2),
         )
         self.register_buffer(
             "angles",
             torch.zeros(self.n),
         )
         self.angle_history = []
-        self.initial_state = {
-            "xy": self.xy.clone(),
-            "xy_dot_old": self.xy_dot_old.clone(),
-            "angles": self.angles.clone(),
-        }
+        self.initial_state = {}
+        self.reset()
 
+    @staticmethod
     def param_type_converter(
-        self,
         params: list[float] | np.ndarray | torch.Tensor,
     ) -> torch.Tensor:
         """
@@ -295,7 +298,7 @@ class NaCPG(nn.Module):
     @staticmethod
     def term_a(alpha: float, r2i: float) -> float:
         """Term A from the NA-CPG equations."""
-        return alpha * (1 - r2i**2)
+        return alpha * (1 - r2i)
 
     @staticmethod
     def term_b(zeta_i: float, w_i: float) -> float:
@@ -305,14 +308,24 @@ class NaCPG(nn.Module):
     @staticmethod
     def zeta(ha_i: float, x_dot_old: float) -> float:
         """Zeta function from the NA-CPG equations."""
-        return 1 - ha_i * ((x_dot_old + E) / (torch.abs(x_dot_old) + E))
+        return 1 - ha_i * torch.sign(x_dot_old)
 
     def reset(self) -> None:
-        """Reset the internal states to their initial values."""
-        self.xy.data = self.initial_state["xy"].clone()
-        self.xy_dot_old.data = self.initial_state["xy_dot_old"].clone()
-        self.angles.data = self.initial_state["angles"].clone()
+        """Reset internal states from the current CPG parameters."""
+        self.xy.data = torch.stack(
+            [torch.cos(self.phase), self.b + torch.sin(self.phase)],
+            dim=1,
+        )
+        self.xy_dot_old.data = torch.zeros_like(self.xy_dot_old)
+        self.angles.data = torch.zeros_like(self.angles)
         self.angle_history = []
+        self.cf_bind_count = 0
+        self.cf_step_count = 0
+        self.initial_state = {
+            "xy": self.xy.clone(),
+            "xy_dot_old": self.xy_dot_old.clone(),
+            "angles": self.angles.clone(),
+        }
 
     def forward(self, time: float | None = None) -> torch.Tensor:
         """
@@ -360,8 +373,9 @@ class NaCPG(nn.Module):
                 ha_i = self.ha[i]
                 w_i = self.w[i]
                 xi, yi = self.xy[i]
+                b_i = self.b[i]
 
-                r2i = xi**2 + yi**2
+                r2i = xi**2 + (yi - b_i) ** 2
                 term_a = self.term_a(self.alpha, r2i)
 
                 zeta_i = self.zeta(ha_i, x_dot_old)
@@ -374,42 +388,61 @@ class NaCPG(nn.Module):
 
             # Update each CPG
             angles = torch.zeros(self.n)
+            xy_next = torch.zeros_like(self.xy)
+            xy_dot_next = torch.zeros_like(self.xy_dot_old)
             for i, (xi, yi) in enumerate(self.xy):
                 # term_a contribution
-                term_a_vec = torch.mv(k_matrix[i], self.xy[i])
+                b_i = self.b[i]
+                centered_state = torch.stack([xi, yi - b_i])
+                term_a_vec = torch.mv(k_matrix[i], centered_state)
 
                 # term_b contribution
                 term_b_vec = torch.zeros(2)
                 for j in self.adjacency_dict[i]:
-                    term_b_vec += torch.mv(r_matrix[i, j], self.xy[j])
+                    xj, yj = self.xy[j]
+                    neighbor_centered = torch.stack([xj, yj - self.b[j]])
+                    term_b_vec += self.h * torch.mv(
+                        r_matrix[i, j],
+                        neighbor_centered,
+                    )
 
                 # Combine contributions to get the derivative
                 xi_dot, yi_dot = term_a_vec + term_b_vec
 
                 # Constraint function (CF)
                 xi_dot_old, yi_dot_old = self.xy_dot_old[i]
-                diff = 10
+                cf = self.cf_scale * torch.abs(self.w[i])
+                unclamped_xi_dot = xi_dot
+                unclamped_yi_dot = yi_dot
                 xi_dot = torch.clamp(
                     xi_dot,
-                    xi_dot_old - diff,
-                    xi_dot_old + diff,
+                    xi_dot_old - cf,
+                    xi_dot_old + cf,
                 )
                 yi_dot = torch.clamp(
                     yi_dot,
-                    yi_dot_old - diff,
-                    yi_dot_old + diff,
+                    yi_dot_old - cf,
+                    yi_dot_old + cf,
                 )
+                self.cf_bind_count += int(
+                    not torch.isclose(unclamped_xi_dot, xi_dot)
+                    or not torch.isclose(unclamped_yi_dot, yi_dot),
+                )
+                self.cf_step_count += 1
 
                 # Compute new states
                 xi_new = xi + (xi_dot * self.dt)
                 yi_new = yi + (yi_dot * self.dt)
 
                 # Save new values
-                self.xy_dot_old[i] = self.xy[i]
-                self.xy[i] = torch.tensor([xi_new, yi_new])
+                xy_dot_next[i] = torch.stack([xi_dot, yi_dot])
+                xy_next[i] = torch.stack([xi_new, yi_new])
 
                 # Save the angles (results)
                 angles[i] = self.amplitudes[i] * yi_new
+
+            self.xy_dot_old.data = xy_dot_next
+            self.xy.data = xy_next
 
             # Apply hard bounds if requested
             if self.hard_bounds is not None:
@@ -432,7 +465,7 @@ class NaCPG(nn.Module):
         if np.any(np.isnan(angles.cpu().numpy())):
             msg = "NaN values detected in the angle signal.\n"
             msg += f"{angles.cpu().numpy()=}\n"
-            msg += f"{self.clamping_error.cpu().numpy()=}\n"
+            msg += f"{self.clamping_error=}\n"
             msg += f"{self.xy.cpu().numpy()=}\n"
             msg += f"{self.xy_dot_old.cpu().numpy()=}\n"
             msg += f"{self.ha.cpu().numpy()=}\n"
