@@ -62,7 +62,7 @@ class ArielModulesConfig(BaseSettings):
     BRICK_MASS: WeightType = 0.055  # 55 grams
 
     # Module dimensions (length, width, height) in meters
-    BRICK_DIMENSIONS: DimensionType = (0.05, 0.05, 0.05)
+    BRICK_DIMENSIONS: DimensionType = (0.04, 0.04, 0.04)
     # ------------------------------ #
 
     # --- Hinge Config --- #
