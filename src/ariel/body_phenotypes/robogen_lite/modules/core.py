@@ -22,7 +22,7 @@ type DimensionType = tuple[float, float, float]
 CORE_MASS: WeightType = 1
 
 # Module dimensions (length, width, height) in meters
-CORE_DIMENSIONS: DimensionType = (0.10, 0.10, 0.10)
+CORE_DIMENSIONS: DimensionType = (0.075, 0.075, 0.075)
 # ------------------------------ #
 
 

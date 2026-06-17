@@ -27,8 +27,8 @@ STATOR_MASS: WeightType = 0.02  # 20 grams
 ROTOR_MASS: WeightType = 0.04  # 40 grams
 
 # Module dimensions (length, width, height) in meters
-STATOR_DIMENSIONS: DimensionType = (0.025, 0.03, 0.025)
-ROTOR_DIMENSIONS: DimensionType = (0.025, 0.02, 0.025)
+STATOR_DIMENSIONS: DimensionType = (0.025, 0.0225, 0.025)
+ROTOR_DIMENSIONS: DimensionType = (0.025, 0.015, 0.025)
 # ------------------------------ #
 
 
