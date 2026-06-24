@@ -19,7 +19,7 @@ type DimensionType = tuple[float, float, float]
 
 # --- Robogen Configuration --- #
 # Module weights (kg)
-CORE_MASS: WeightType = 1
+CORE_MASS: WeightType = 1.35
 
 # Module dimensions (length, width, height) in meters
 CORE_DIMENSIONS: DimensionType = (0.075, 0.075, 0.075)

@@ -23,8 +23,11 @@ type DimensionType = tuple[float, float, float]
 
 # --- Robogen Configuration --- #
 # Module weights (kg)
-STATOR_MASS: WeightType = 0.02  # 20 grams
-ROTOR_MASS: WeightType = 0.04  # 40 grams
+STATOR_CONNECTOR_MASS: WeightType = 0.01084
+SERVO_BODY_MASS: WeightType = 0.0676
+ROTOR_CONNECTOR_MASS: WeightType = 0.0084
+STATOR_MASS: WeightType = STATOR_CONNECTOR_MASS + SERVO_BODY_MASS
+ROTOR_MASS: WeightType = ROTOR_CONNECTOR_MASS
 
 # Module dimensions (length, width, height) in meters
 STATOR_DIMENSIONS: DimensionType = (0.025, 0.0225, 0.025)
@@ -54,10 +57,7 @@ class HingeModule(Module):
 
         # ========= Hinge =========
         hinge_name = self.module_type.name.lower()
-        hinge = spec.worldbody.add_body(
-            name=hinge_name,
-            mass=STATOR_MASS + ROTOR_MASS,
-        )
+        hinge = spec.worldbody.add_body(name=hinge_name)
 
         # ========= Stator =========
         stator_name = "stator"
