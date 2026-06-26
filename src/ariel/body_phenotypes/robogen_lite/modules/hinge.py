@@ -96,8 +96,8 @@ class HingeModule(Module):
 
         # ========= Servo =========
         # Robot actuators
-        kp = 1
-        kv = 1  # critically damp oscillator
+        kp = 3.5
+        kv = 1.75  # fitted against real Baby robot hinge sweep feedback
         servo_axis = (0, 0, 1)
 
         servo_name = "servo"
